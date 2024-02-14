@@ -89,8 +89,8 @@ from yugabyte.test_descriptor import TEST_DESCRIPTOR_SEPARATOR  # noqa
 TEST_TIMEOUT_UPPER_BOUND_SEC = 35 * 60
 
 # Defaults for maximum test failure threshold, after which the Spark job will be aborted
-DEFAULT_MAX_NUM_TEST_FAILURES_MACOS_DEBUG = 150
-DEFAULT_MAX_NUM_TEST_FAILURES = 100
+DEFAULT_MAX_NUM_TEST_FAILURES_MACOS_DEBUG = 100000
+DEFAULT_MAX_NUM_TEST_FAILURES = 100000
 
 # Default for test artifact size limit to copy back to the build host, in bytes.
 MAX_ARTIFACT_SIZE_BYTES = 100 * 1024 * 1024
