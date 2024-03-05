@@ -30,7 +30,7 @@ typedef YBCAshSample* (*YBCAshGetNextCircularBufferSlot)();
 // functions in this API are called.
 void YBCInitPgGate(const YBCPgTypeEntity *YBCDataTypeTable, int count,
                    YBCPgCallbacks pg_callbacks, uint64_t *session_id,
-                   const YBCAshMetadata *ash_metadata, bool *is_ash_metadata_set);
+                   const YBCPgAshConfig* ash_config);
 void YBCDestroyPgGate();
 void YBCInterruptPgGate();
 
@@ -439,7 +439,8 @@ YBCStatus YBCPgDmlBindColumnCondIn(YBCPgStatement handle,
                                    int n_attr_values,
                                    YBCPgExpr *attr_values);
 YBCStatus YBCPgDmlBindColumnCondIsNotNull(YBCPgStatement handle, int attr_num);
-YBCStatus YBCPgDmlBindRow(YBCPgStatement handle, YBCBindColumn* columns, int count);
+YBCStatus YBCPgDmlBindRow(
+    YBCPgStatement handle, uint64_t ybctid, YBCBindColumn* columns, int count);
 
 YBCStatus YBCPgDmlGetColumnInfo(YBCPgStatement handle, int attr_num, YBCPgColumnInfo* info);
 
@@ -508,6 +509,15 @@ YBCStatus YBCPgExecSample(YBCPgStatement handle);
 YBCStatus YBCPgGetEstimatedRowCount(YBCPgStatement handle, double *liverows, double *deadrows);
 
 // INSERT ------------------------------------------------------------------------------------------
+
+// Allocate block of inserts to the same table.
+YBCStatus YBCPgNewInsertBlock(
+    YBCPgOid database_oid,
+    YBCPgOid table_oid,
+    bool is_region_local,
+    YBCPgTransactionSetting transaction_setting,
+    YBCPgStatement *handle);
+
 YBCStatus YBCPgNewInsert(YBCPgOid database_oid,
                          YBCPgOid table_relfilenode_oid,
                          bool is_region_local,
@@ -768,10 +778,14 @@ YBCStatus YBCPgNewCreateReplicationSlot(const char *slot_name,
                                         YBCPgOid database_oid,
                                         YBCPgReplicationSlotSnapshotAction snapshot_action,
                                         YBCPgStatement *handle);
-YBCStatus YBCPgExecCreateReplicationSlot(YBCPgStatement handle);
+YBCStatus YBCPgExecCreateReplicationSlot(YBCPgStatement handle,
+                                         uint64_t *consistent_snapshot_time);
 
 YBCStatus YBCPgListReplicationSlots(
     YBCReplicationSlotDescriptor **replication_slots, size_t *numreplicationslots);
+
+YBCStatus YBCPgGetReplicationSlot(
+    const char *slot_name, YBCReplicationSlotDescriptor **replication_slot);
 
 YBCStatus YBCPgGetReplicationSlotStatus(const char *slot_name,
                                         bool *active);
@@ -779,6 +793,14 @@ YBCStatus YBCPgGetReplicationSlotStatus(const char *slot_name,
 YBCStatus YBCPgNewDropReplicationSlot(const char *slot_name,
                                       YBCPgStatement *handle);
 YBCStatus YBCPgExecDropReplicationSlot(YBCPgStatement handle);
+
+YBCStatus YBCPgInitVirtualWalForCDC(
+    const char *stream_id, const YBCPgOid database_oid, YBCPgOid *relations, size_t num_relations);
+
+YBCStatus YBCPgDestroyVirtualWalForCDC();
+
+YBCStatus YBCPgGetCDCConsistentChanges(const char *stream_id,
+                                       YBCPgChangeRecordBatch **record_batch);
 
 // Get a new OID from the OID allocator of database db_oid.
 YBCStatus YBCGetNewObjectId(YBCPgOid db_oid, YBCPgOid* new_oid);
@@ -803,7 +825,7 @@ struct PgApiContext;
 void YBCInitPgGateEx(
     const YBCPgTypeEntity *data_type_table, int count, YBCPgCallbacks pg_callbacks,
     PgApiContext *context, std::optional<uint64_t> session_id,
-    const YBCAshMetadata* ash_metadata, bool *is_ash_metadata_set);
+    const YBCPgAshConfig* ash_config);
 
 } // namespace pggate
 } // namespace yb

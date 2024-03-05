@@ -13,6 +13,7 @@ import com.yugabyte.yw.common.FakeDBApplication;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.common.config.GlobalConfKeys;
 import com.yugabyte.yw.common.config.RuntimeConfGetter;
+import com.yugabyte.yw.common.operator.OperatorStatusUpdater.UniverseState;
 import com.yugabyte.yw.common.operator.utils.KubernetesEnvironmentVariables;
 import com.yugabyte.yw.common.operator.utils.OperatorUtils;
 import com.yugabyte.yw.common.operator.utils.OperatorWorkQueue;
@@ -43,8 +44,6 @@ import io.yugabyte.operator.v1alpha1.YBUniverse;
 import io.yugabyte.operator.v1alpha1.YBUniverseSpec;
 import io.yugabyte.operator.v1alpha1.YBUniverseStatus;
 import io.yugabyte.operator.v1alpha1.ybuniversespec.DeviceInfo;
-import io.yugabyte.operator.v1alpha1.ybuniversespec.MasterK8SNodeResourceSpec;
-import io.yugabyte.operator.v1alpha1.ybuniversespec.TserverK8SNodeResourceSpec;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -354,6 +353,27 @@ public class YBUniverseReconcilerTest extends FakeDBApplication {
     assertFalse(Universe.maybeGet(oldUniverse.getUniverseUUID()).isPresent());
   }
 
+  @Test
+  public void testCreateAutoProviderFailStatusUpdate() throws Exception {
+    String universeName = "test-provider-create-fail";
+    YBUniverse ybUniverse = createYbUniverse(universeName);
+    ybUniverse.getSpec().setProviderName("");
+    KubernetesProviderFormData providerData = new KubernetesProviderFormData();
+    Mockito.when(cloudProviderHandler.suggestedKubernetesConfigs()).thenReturn(providerData);
+    Mockito.when(
+            cloudProviderHandler.createKubernetes(
+                any(Customer.class), any(KubernetesProviderFormData.class)))
+        .thenThrow(new RuntimeException());
+    try {
+      UniverseDefinitionTaskParams taskParams =
+          ybUniverseReconciler.createTaskParams(ybUniverse, defaultCustomer.getUuid());
+    } catch (Exception e) {
+    }
+    Mockito.verify(kubernetesStatusUpdator, Mockito.times(1))
+        .updateUniverseState(
+            any(KubernetesResourceDetails.class), eq(UniverseState.ERROR_CREATING));
+  }
+
   private YBUniverse createYbUniverse() {
     return createYbUniverse(null);
   }
@@ -374,8 +394,6 @@ public class YBUniverseReconcilerTest extends FakeDBApplication {
     spec.setNumNodes(1L);
     spec.setZoneFilter(zones);
     spec.setReplicationFactor((long) 1);
-    spec.setAssignPublicIP(true);
-    spec.setUseTimeSync(true);
     spec.setEnableYSQL(true);
     spec.setEnableYCQL(false);
     spec.setEnableNodeToNodeEncrypt(false);
@@ -383,8 +401,6 @@ public class YBUniverseReconcilerTest extends FakeDBApplication {
     spec.setYsqlPassword(null);
     spec.setYcqlPassword(null);
     spec.setProviderName(defaultProvider.getName());
-    spec.setMasterK8SNodeResourceSpec(new MasterK8SNodeResourceSpec());
-    spec.setTserverK8SNodeResourceSpec(new TserverK8SNodeResourceSpec());
     DeviceInfo deviceInfo = new DeviceInfo();
     spec.setDeviceInfo(deviceInfo);
 
