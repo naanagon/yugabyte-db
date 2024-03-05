@@ -62,6 +62,7 @@
 #include "yb/master/catalog_manager_if.h"
 #include "yb/master/catalog_manager_util.h"
 #include "yb/master/cdc_split_driver.h"
+#include "yb/master/clone/clone_state_manager.h"
 #include "yb/master/master_admin.pb.h"
 #include "yb/master/master_backup.pb.h"
 #include "yb/master/master_dcl.fwd.h"
@@ -75,7 +76,7 @@
 #include "yb/master/sys_catalog_initialization.h"
 #include "yb/master/system_tablet.h"
 #include "yb/master/table_index.h"
-#include "yb/master/tablet_limits.h"
+#include "yb/master/tablet_creation_limits.h"
 #include "yb/master/tablet_split_candidate_filter.h"
 #include "yb/master/tablet_split_driver.h"
 #include "yb/master/tablet_split_manager.h"
@@ -109,6 +110,7 @@ class ThreadPool;
 class AddTransactionStatusTabletRequestPB;
 class AddTransactionStatusTabletResponsePB;
 class UniverseKeyRegistryPB;
+class IsOperationDoneResult;
 
 template<class T>
 class AtomicGauge;
@@ -263,8 +265,8 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
 
   Status CreateTableIfNotFound(
       const std::string& namespace_name, const std::string& table_name,
-      std::function<Result<CreateTableRequestPB>()> generate_request, CreateTableResponsePB* resp,
-      rpc::RpcContext* rpc, const LeaderEpoch& epoch);
+      std::function<Result<CreateTableRequestPB>()> generate_request, const LeaderEpoch& epoch)
+      EXCLUDES(mutex_);
 
   // Create a new transaction status table.
   Status CreateTransactionStatusTable(const CreateTransactionStatusTableRequestPB* req,
@@ -344,16 +346,6 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
                                  bool* alter_in_progress);
 
   Status WaitForAlterTableToFinish(const TableId& table_id, CoarseTimePoint deadline);
-
-  // Check if the transaction status table creation is done.
-  //
-  // This is called at the end of IsCreateTableDone if the table has transactions enabled.
-  Result<bool> IsTransactionStatusTableCreated();
-
-  // Check if the metrics snapshots table creation is done.
-  //
-  // This is called at the end of IsCreateTableDone.
-  Result<bool> IsMetricsSnapshotsTableCreated();
 
   // Called when transaction associated with table create finishes. Verifies postgres layer present.
   Status VerifyTablePgLayer(
@@ -689,9 +681,8 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
       EXCLUDES(heartbeat_pg_catalog_versions_cache_mutex_);
   Status GetYsqlDBCatalogVersion(
       uint32_t db_oid, uint64_t* catalog_version, uint64_t* last_breaking_version) override;
-  bool catalog_version_table_in_perdb_mode() const override {
-    return catalog_version_table_in_perdb_mode_;
-  }
+
+  Status IsCatalogVersionTableInPerdbMode(bool* perdb_mode);
 
   Status InitializeTransactionTablesConfig(int64_t term);
 
@@ -799,7 +790,8 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
   // trigger trying to transition the table from DELETING to DELETED state.
   void NotifyTabletDeleteFinished(
       const TabletServerId& tserver_uuid, const TabletId& tablet_id,
-      const TableInfoPtr& table, const LeaderEpoch& epoch) override;
+      const TableInfoPtr& table, const LeaderEpoch& epoch,
+      server::MonitoredTaskState task_state) override;
 
   // For a DeleteTable, we first mark tables as DELETING then move them to DELETED once all
   // outstanding tasks are complete and the TS side tablets are deleted.
@@ -1204,7 +1196,6 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
       const TxnSnapshotId& snapshot_id, HybridTime read_time, const docdb::DocDB& doc_db,
       std::reference_wrapper<const ScopedRWOperation> db_pending_op);
 
-  // API to restore a snapshot.
   Status RestoreSnapshot(
       const RestoreSnapshotRequestPB* req, RestoreSnapshotResponsePB* resp, rpc::RpcContext* rpc,
       const LeaderEpoch& epoch);
@@ -1505,7 +1496,7 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
       const std::vector<xrepl::StreamId>& stream_ids,
       const std::vector<yb::master::SysCDCStreamEntryPB>& update_entries);
 
-  tablet::SnapshotCoordinator& snapshot_coordinator() override { return snapshot_coordinator_; }
+  MasterSnapshotCoordinator& snapshot_coordinator() override { return snapshot_coordinator_; }
 
   Result<size_t> GetNumLiveTServersForActiveCluster() override;
 
@@ -1575,6 +1566,17 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
 
   void MarkUniverseForCleanup(const xcluster::ReplicationGroupId& replication_group_id)
       EXCLUDES(mutex_);
+
+  Status CreateCdcStateTableIfNotFound(const LeaderEpoch& epoch) EXCLUDES(mutex_);
+
+  // Create a new Xrepl stream, start mutation and add it to cdc_stream_map_.
+  // Caller is responsible for writing the stream to sys_catalog followed by CommitMutation.
+  // or calling ReleaseAbandonedXreplStream to release the unused stream.
+  Result<scoped_refptr<CDCStreamInfo>> InitNewXReplStream() EXCLUDES(mutex_);
+  void ReleaseAbandonedXReplStream(const xrepl::StreamId& stream_id) EXCLUDES(mutex_);
+
+  Status SetWalRetentionForTable(
+      const TableId& table_id, rpc::RpcContext* rpc, const LeaderEpoch& epoch) EXCLUDES(mutex_);
 
  protected:
   // TODO Get rid of these friend classes and introduce formal interface.
@@ -2131,7 +2133,7 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
 
   Result<TableInfoPtr> GetGlobalTransactionStatusTable();
 
-  Result<bool> IsCreateTableDone(const TableInfoPtr& table);
+  Result<IsOperationDoneResult> IsCreateTableDone(const TableInfoPtr& table);
 
   // SetupReplicationWithBootstrap
   Status ValidateReplicationBootstrapRequest(
@@ -2371,6 +2373,8 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
 
   // Number of dead tservers metric.
   scoped_refptr<AtomicGauge<uint32_t>> metric_num_tablet_servers_dead_;
+
+  scoped_refptr<Counter> metric_create_table_too_many_tablets_;
 
   friend class ClusterLoadBalancer;
 
@@ -2764,8 +2768,6 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
       const CreateCDCStreamRequestPB& req, rpc::RpcContext* rpc, const LeaderEpoch& epoch,
       const std::vector<TableId>& table_ids, const xrepl::StreamId& stream_id,
       const bool has_consistent_snapshot_option, bool require_history_cutoff);
-  Status SetWalRetentionForTable(
-      const TableId& table_id, rpc::RpcContext* rpc, const LeaderEpoch& epoch);
   Status BackfillMetadataForCDC(
       const TableId& table_id, rpc::RpcContext* rpc, const LeaderEpoch& epoch);
 
@@ -3134,6 +3136,8 @@ class CatalogManager : public tserver::TabletPeerLookupIf,
   ServerRegistrationPB server_registration_;
 
   TabletSplitManager tablet_split_manager_;
+
+  std::unique_ptr<CloneStateManager> clone_state_manager_;
 
   mutable MutexType delete_replica_task_throttler_per_ts_mutex_;
 

@@ -729,6 +729,7 @@ class PgClientServiceImpl::Impl {
     std::vector<master::TSInformationPB> live_tservers;
     RETURN_NOT_OK(tablet_server_.GetLiveTServers(&live_tservers));
     GetLockStatusRequestPB lock_status_req;
+    lock_status_req.set_max_txn_locks_per_tablet(req.max_txn_locks_per_tablet());
     if (!req.transaction_id().empty()) {
       // TODO(pglocks): Forward the request to tservers hosting the involved tablets of the txn,
       // as opposed to broadcasting the request to all live tservers.
@@ -1103,13 +1104,23 @@ class PgClientServiceImpl::Impl {
     return Status::OK();
   }
 
+  Status GetReplicationSlot(
+      const PgGetReplicationSlotRequestPB& req, PgGetReplicationSlotResponsePB* resp,
+      rpc::RpcContext* context) {
+    LOG_WITH_FUNC(INFO) << "Start with req: " << req.DebugString();
+    auto stream =
+        VERIFY_RESULT(client().GetCDCStream(ReplicationSlotName(req.replication_slot_name())));
+    stream.ToPB(resp->mutable_replication_slot_info());
+    return Status::OK();
+  }
+
   Status GetReplicationSlotStatus(
       const PgGetReplicationSlotStatusRequestPB& req, PgGetReplicationSlotStatusResponsePB* resp,
       rpc::RpcContext* context) {
     // Get the stream_id for the replication slot.
-    xrepl::StreamId stream_id = xrepl::StreamId::Nil();
-    RETURN_NOT_OK(
-        client().GetCDCStream(ReplicationSlotName(req.replication_slot_name()), &stream_id));
+    auto stream =
+        VERIFY_RESULT(client().GetCDCStream(ReplicationSlotName(req.replication_slot_name())));
+    auto stream_id = VERIFY_RESULT(xrepl::StreamId::FromString(stream.stream_id));
 
     // TODO(#19850): Fetch only the entries belonging to the stream_id from the table.
     Status iteration_status;
@@ -1283,7 +1294,7 @@ class PgClientServiceImpl::Impl {
 
   void AddRaftAppenderThreadWaitStates(tserver::WaitStatesPB* resp) {
     for (auto& wait_state_ptr : ash::RaftLogAppenderWaitStatesTracker().GetWaitStates()) {
-      if (wait_state_ptr) {
+      if (wait_state_ptr && wait_state_ptr->code() != ash::WaitStateCode::kIdle) {
         wait_state_ptr->ToPB(resp->add_wait_states());
       }
     }
@@ -1291,7 +1302,7 @@ class PgClientServiceImpl::Impl {
 
   void AddPriorityThreadPoolWaitStates(tserver::WaitStatesPB* resp) {
     for (auto& wait_state_ptr : ash::FlushAndCompactionWaitStatesTracker().GetWaitStates()) {
-      if (wait_state_ptr) {
+      if (wait_state_ptr && wait_state_ptr->code() != ash::WaitStateCode::kIdle) {
         wait_state_ptr->ToPB(resp->add_wait_states());
       }
     }
