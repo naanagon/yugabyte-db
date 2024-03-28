@@ -216,6 +216,7 @@ public abstract class LocalProviderUniverseTestBase extends PlatformGuiceApplica
 
     waitForClusterToStabilize = System.getenv(SKIP_WAIT_FOR_CLUSTER_ENV_KEY) == null;
     setUpYBSoftware(os, arch);
+    ybcBinPath = System.getenv(YBC_BIN_ENV_KEY);
     subDir = DATE_FORMAT.format(new Date());
   }
 
@@ -244,7 +245,6 @@ public abstract class LocalProviderUniverseTestBase extends PlatformGuiceApplica
   }
 
   private void setUpYBCSoftware(String os, String arch) {
-    ybcBinPath = System.getenv(YBC_BIN_ENV_KEY);
     if (ybcBinPath == null) {
       String ybcVersion = confGetter.getGlobalConf(GlobalConfKeys.ybcStableVersion);
       YBC_VERSION = ybcVersion;
