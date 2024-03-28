@@ -1580,10 +1580,15 @@ Status CatalogManager::FindCDCSDKStreamsForAddedTables(
         ltm->pb.state() == SysCDCStreamEntryPB::DELETING_METADATA) {
       for (const auto& unprocessed_table_id : *unprocessed_tables) {
         auto table = tables_->FindTableOrNull(unprocessed_table_id);
+        if (!table) {
+          LOG_WITH_FUNC(WARNING) << "Table " << unprocessed_table_id
+                                 << " deleted before it could be processed";
+          continue;
+        }
         Schema schema;
         auto status = table->GetSchema(&schema);
         if (!status.ok()) {
-          LOG(WARNING) << "Error while getting schema for table: " << table->name();
+          LOG_WITH_FUNC(WARNING) << "Error while getting schema for table: " << table->name();
           continue;
         }
         bool has_pk = true;
@@ -1668,13 +1673,14 @@ Status CatalogManager::ValidateCDCSDKRequestProperties(
         "Creation of CDCSDK stream with a replication slot name is disallowed");
   }
 
+  // No need to validate the record_type if replica identity support is enabled.
+  if (FLAGS_ysql_yb_enable_replica_identity) {
+    return Status::OK();
+  }
+
   cdc::CDCRecordType record_type_pb;
   if (!cdc::CDCRecordType_Parse(record_type_option_value, &record_type_pb)) {
     return STATUS(InvalidArgument, "Invalid CDCRecordType value", record_type_option_value);
-  }
-
-  if (FLAGS_ysql_yb_enable_replica_identity) {
-    return Status::OK();
   }
 
   switch (record_type_pb) {

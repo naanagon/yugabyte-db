@@ -401,14 +401,10 @@ class PgClientServiceImpl::Impl {
   explicit Impl(
       std::reference_wrapper<const TabletServerIf> tablet_server,
       const std::shared_future<client::YBClient*>& client_future,
-      const scoped_refptr<ClockBase>& clock,
-      TransactionPoolProvider transaction_pool_provider,
-      rpc::Messenger* messenger,
-      const std::optional<XClusterContext>& xcluster_context,
-      PgMutationCounter* pg_node_level_mutation_counter,
-      MetricEntity* metric_entity,
-      const std::shared_ptr<MemTracker>& parent_mem_tracker,
-      const std::string& permanent_uuid,
+      const scoped_refptr<ClockBase>& clock, TransactionPoolProvider transaction_pool_provider,
+      rpc::Messenger* messenger, const TserverXClusterContextIf* xcluster_context,
+      PgMutationCounter* pg_node_level_mutation_counter, MetricEntity* metric_entity,
+      const std::shared_ptr<MemTracker>& parent_mem_tracker, const std::string& permanent_uuid,
       const server::ServerBaseOptions* tablet_server_opts)
       : tablet_server_(tablet_server.get()),
         client_future_(client_future),
@@ -1136,9 +1132,35 @@ class PgClientServiceImpl::Impl {
   Status GetReplicationSlot(
       const PgGetReplicationSlotRequestPB& req, PgGetReplicationSlotResponsePB* resp,
       rpc::RpcContext* context) {
-    auto stream =
-        VERIFY_RESULT(client().GetCDCStream(ReplicationSlotName(req.replication_slot_name())));
+    std::unordered_map<uint32_t, PgReplicaIdentity> replica_identities;
+    auto stream = VERIFY_RESULT(client().GetCDCStream(
+        ReplicationSlotName(req.replication_slot_name()), &replica_identities));
     stream.ToPB(resp->mutable_replication_slot_info());
+
+    auto m = resp->mutable_replication_slot_info()->mutable_replica_identity_map();
+    for (const auto& replica_identity : replica_identities) {
+      PgReplicaIdentityType replica_identity_value;
+      switch (replica_identity.second) {
+        case PgReplicaIdentity::DEFAULT:
+          replica_identity_value = PgReplicaIdentityType::DEFAULT;
+          break;
+        case PgReplicaIdentity::FULL:
+          replica_identity_value = PgReplicaIdentityType::FULL;
+          break;
+        case PgReplicaIdentity::NOTHING:
+          replica_identity_value = PgReplicaIdentityType::NOTHING;
+          break;
+        case PgReplicaIdentity::CHANGE:
+          replica_identity_value = PgReplicaIdentityType::CHANGE;
+          break;
+        default:
+          RSTATUS_DCHECK(false, InternalError, "Invalid Replica Identity Type");
+      }
+
+      PgReplicaIdentityPB replica_identity_pb;
+      replica_identity_pb.set_replica_identity(replica_identity_value);
+      m->insert({replica_identity.first, std::move(replica_identity_pb)});
+    }
 
     auto stream_id = VERIFY_RESULT(xrepl::StreamId::FromString(stream.stream_id));
     bool is_slot_active;
@@ -1168,8 +1190,8 @@ class PgClientServiceImpl::Impl {
       const PgGetReplicationSlotStatusRequestPB& req, PgGetReplicationSlotStatusResponsePB* resp,
       rpc::RpcContext* context) {
     // Get the stream_id for the replication slot.
-    auto stream =
-        VERIFY_RESULT(client().GetCDCStream(ReplicationSlotName(req.replication_slot_name())));
+    auto stream = VERIFY_RESULT(client().GetCDCStream(
+        ReplicationSlotName(req.replication_slot_name()), /* replica_identities */ nullptr));
     auto stream_id = VERIFY_RESULT(xrepl::StreamId::FromString(stream.stream_id));
 
     bool is_slot_active;
@@ -1595,6 +1617,13 @@ class PgClientServiceImpl::Impl {
     return Status::OK();
   }
 
+  Status YCQLStatementStats(const PgYCQLStatementStatsRequestPB& req,
+      PgYCQLStatementStatsResponsePB* resp,
+      rpc::RpcContext* context) {
+    RETURN_NOT_OK(tablet_server_.YCQLStatementStats(req, resp));
+    return Status::OK();
+  }
+
   #define PG_CLIENT_SESSION_METHOD_FORWARD(r, data, method) \
   Status method( \
       const BOOST_PP_CAT(BOOST_PP_CAT(Pg, method), RequestPB)& req, \
@@ -1792,7 +1821,7 @@ class PgClientServiceImpl::Impl {
   std::unique_ptr<yb::client::AsyncClientInitializer> cdc_state_client_init_;
   std::shared_ptr<cdc::CDCStateTable> cdc_state_table_;
 
-  const std::optional<XClusterContext> xcluster_context_;
+  const TserverXClusterContextIf* xcluster_context_;
 
   PgMutationCounter* pg_node_level_mutation_counter_;
 
@@ -1818,14 +1847,11 @@ class PgClientServiceImpl::Impl {
 PgClientServiceImpl::PgClientServiceImpl(
     std::reference_wrapper<const TabletServerIf> tablet_server,
     const std::shared_future<client::YBClient*>& client_future,
-    const scoped_refptr<ClockBase>& clock,
-    TransactionPoolProvider transaction_pool_provider,
+    const scoped_refptr<ClockBase>& clock, TransactionPoolProvider transaction_pool_provider,
     const std::shared_ptr<MemTracker>& parent_mem_tracker,
-    const scoped_refptr<MetricEntity>& entity,
-    rpc::Messenger* messenger,
-    const std::string& permanent_uuid,
-    const server::ServerBaseOptions* tablet_server_opts,
-    const std::optional<XClusterContext>& xcluster_context,
+    const scoped_refptr<MetricEntity>& entity, rpc::Messenger* messenger,
+    const std::string& permanent_uuid, const server::ServerBaseOptions* tablet_server_opts,
+    const TserverXClusterContextIf* xcluster_context,
     PgMutationCounter* pg_node_level_mutation_counter)
     : PgClientServiceIf(entity),
       impl_(new Impl(
