@@ -9,7 +9,6 @@ import static org.junit.Assert.assertTrue;
 import static play.test.Helpers.contentAsString;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.yugabyte.yw.commissioner.tasks.CommissionerBaseTest;
 import com.yugabyte.yw.common.FakeApiHelper;
 import com.yugabyte.yw.common.LocalNodeManager;
 import com.yugabyte.yw.common.ModelFactory;
@@ -100,8 +99,7 @@ public class XClusterLocalTest extends LocalProviderUniverseTestBase {
     Result result = createXClusterConfig(formData);
     assertOk(result);
     JsonNode json = Json.parse(contentAsString(result));
-    TaskInfo taskInfo =
-        CommissionerBaseTest.waitForTask(UUID.fromString(json.get("taskUUID").asText()));
+    TaskInfo taskInfo = waitForTask(UUID.fromString(json.get("taskUUID").asText()), source, target);
     assertEquals(TaskInfo.State.Success, taskInfo.getTaskState());
     verifyUniverseState(Universe.getOrBadRequest(source.getUniverseUUID()));
     verifyUniverseState(Universe.getOrBadRequest(target.getUniverseUUID()));
@@ -169,8 +167,7 @@ public class XClusterLocalTest extends LocalProviderUniverseTestBase {
     Result result = createXClusterConfig(formData);
     assertOk(result);
     JsonNode json = Json.parse(contentAsString(result));
-    TaskInfo taskInfo =
-        CommissionerBaseTest.waitForTask(UUID.fromString(json.get("taskUUID").asText()));
+    TaskInfo taskInfo = waitForTask(UUID.fromString(json.get("taskUUID").asText()), source, target);
     assertEquals(TaskInfo.State.Success, taskInfo.getTaskState());
     verifyUniverseState(Universe.getOrBadRequest(source.getUniverseUUID()));
     verifyUniverseState(Universe.getOrBadRequest(target.getUniverseUUID()));
@@ -209,7 +206,7 @@ public class XClusterLocalTest extends LocalProviderUniverseTestBase {
     editFormData.bootstrapParams.tables = editFormData.tables;
     result = editXClusterConfig(editFormData, UUID.fromString(json.get("resourceUUID").asText()));
     json = Json.parse(contentAsString(result));
-    taskInfo = CommissionerBaseTest.waitForTask(UUID.fromString(json.get("taskUUID").asText()));
+    taskInfo = waitForTask(UUID.fromString(json.get("taskUUID").asText()), source, target);
     assertEquals(TaskInfo.State.Success, taskInfo.getTaskState());
     verifyUniverseState(Universe.getOrBadRequest(source.getUniverseUUID()));
     verifyUniverseState(Universe.getOrBadRequest(target.getUniverseUUID()));

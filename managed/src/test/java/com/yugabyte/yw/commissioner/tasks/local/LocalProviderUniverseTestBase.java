@@ -2,7 +2,6 @@
 
 package com.yugabyte.yw.commissioner.tasks.local;
 
-import static com.yugabyte.yw.commissioner.tasks.CommissionerBaseTest.waitForTask;
 import static com.yugabyte.yw.common.TestHelper.testDatabase;
 import static com.yugabyte.yw.common.Util.YUGABYTE_DB;
 import static com.yugabyte.yw.forms.UniverseConfigureTaskParams.ClusterOperationType.CREATE;
@@ -621,7 +620,8 @@ public abstract class LocalProviderUniverseTestBase extends PlatformGuiceApplica
     paramsCustomizer.accept(taskParams);
     // CREATE
     UniverseResp universeResp = universeCRUDHandler.createUniverse(customer, taskParams);
-    TaskInfo taskInfo = waitForTask(universeResp.taskUUID);
+    TaskInfo taskInfo =
+        waitForTask(universeResp.taskUUID, Universe.getOrBadRequest(universeResp.universeUUID));
     verifyUniverseTaskSuccess(taskInfo);
     Universe result = Universe.getOrBadRequest(universeResp.universeUUID);
     assertEquals(
@@ -819,14 +819,15 @@ public abstract class LocalProviderUniverseTestBase extends PlatformGuiceApplica
     TaskInfo taskInfo =
         waitForTask(
             universeCRUDHandler.createCluster(
-                customer, Universe.getOrBadRequest(universe.getUniverseUUID()), taskParams));
+                customer, Universe.getOrBadRequest(universe.getUniverseUUID()), taskParams),
+            Universe.getOrBadRequest(universe.getUniverseUUID()));
     return taskInfo;
   }
 
   protected TaskInfo destroyUniverse(Universe universe, Customer customer)
       throws InterruptedException {
     UUID taskID = universeCRUDHandler.destroy(customer, universe, true, false, false);
-    TaskInfo taskInfo = waitForTask(taskID);
+    TaskInfo taskInfo = waitForTask(taskID, universe);
     return taskInfo;
   }
 
@@ -931,7 +932,7 @@ public abstract class LocalProviderUniverseTestBase extends PlatformGuiceApplica
             : UpgradeTaskParams.UpgradeOption.NON_ROLLING_UPGRADE;
     restartTaskParams.clusters = universe.getUniverseDetails().clusters;
     UUID taskUUID = upgradeUniverseHandler.restartUniverse(restartTaskParams, customer, universe);
-    TaskInfo taskInfo = waitForTask(taskUUID);
+    TaskInfo taskInfo = waitForTask(taskUUID, universe);
     verifyUniverseTaskSuccess(taskInfo);
   }
 
@@ -960,6 +961,13 @@ public abstract class LocalProviderUniverseTestBase extends PlatformGuiceApplica
         }
       }
       failedTasksMessages.forEach(t -> errorBuilder.append(separator).append(t));
+    }
+    if (taskInfo.getTaskState() != TaskInfo.State.Success) {
+      try {
+        log.debug("Dumping to log");
+        dumpToLog(universe);
+      } catch (InterruptedException e) {
+      }
     }
     assertEquals(errorBuilder.toString(), TaskInfo.State.Success, taskInfo.getTaskState());
   }
@@ -1002,5 +1010,27 @@ public abstract class LocalProviderUniverseTestBase extends PlatformGuiceApplica
       }
     }
     return sb.toString();
+  }
+
+  protected TaskInfo waitForTask(UUID taskUUID, Universe... universes) throws InterruptedException {
+    try {
+      return CommissionerBaseTest.waitForTask(taskUUID);
+    } catch (Exception e) {
+      dumpToLog(universes);
+      throw new RuntimeException(e);
+    }
+  }
+
+  private void dumpToLog(Universe... universes) throws InterruptedException {
+    localNodeManager.checkAllProcessesAlive();
+    for (Universe universe : universes) {
+      Universe u = Universe.getOrBadRequest(universe.getUniverseUUID());
+      for (NodeDetails node : u.getNodes()) {
+        for (UniverseTaskBase.ServerType serverType : node.getAllProcesses()) {
+          localNodeManager.dumpProcessOutput(u, node.getNodeName(), serverType);
+        }
+      }
+    }
+    Thread.sleep(1000);
   }
 }

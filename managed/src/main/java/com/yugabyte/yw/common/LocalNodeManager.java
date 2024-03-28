@@ -28,7 +28,6 @@ import com.yugabyte.yw.commissioner.tasks.subtasks.InstanceActions;
 import com.yugabyte.yw.commissioner.tasks.subtasks.TransferXClusterCerts;
 import com.yugabyte.yw.common.certmgmt.CertificateHelper;
 import com.yugabyte.yw.common.config.RuntimeConfGetter;
-import com.yugabyte.yw.common.gflags.GFlagsUtil;
 import com.yugabyte.yw.common.gflags.SpecificGFlags;
 import com.yugabyte.yw.common.utils.FileUtils;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
@@ -63,6 +62,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -87,9 +87,9 @@ public class LocalNodeManager {
   private static final String MAX_MEM_RATIO_TSERVER = "0.1";
   private static final String MAX_MEM_RATIO_MASTER = "0.05";
 
-  private static final int ERROR_LINES_TO_DUMP = 100;
-  private static final int OUT_LINES_TO_DUMP = 20;
-  private static final int EXIT_LINES_TO_DUMP = 30;
+  private static final int ERROR_LINES_TO_DUMP = 200;
+  private static final int OUT_LINES_TO_DUMP = 200;
+  private static final int EXIT_LINES_TO_DUMP = 10;
 
   private static final String LOOPBACK_PREFIX = "127.0.";
   public static final String COMMAND_OUTPUT_PREFIX = "Command output:";
@@ -139,7 +139,7 @@ public class LocalNodeManager {
   }
 
   private void killProcess(long pid) throws IOException, InterruptedException {
-    int exitCode = Runtime.getRuntime().exec(String.format("kill -SIGTERM %d", pid)).waitFor();
+    int exitCode = Runtime.getRuntime().exec(String.format("kill -SIGKILL %d", pid)).waitFor();
     if (exitCode != 0) {
       throw new IllegalStateException(
           String.format("Failed to kill process %d - exit code is %d", pid, exitCode));
@@ -152,6 +152,26 @@ public class LocalNodeManager {
     Process process = nodeInfo.processMap.get(serverType);
     log.debug("Destroying process with pid {} for {}", process.pid(), nodeInfo.ip);
     killProcess(process.pid());
+  }
+
+  public void checkAllProcessesAlive() {
+    nodesByNameMap.values().stream()
+        .flatMap(n -> n.processMap.values().stream())
+        .forEach(
+            process -> {
+              try {
+                Optional<ProcessHandle> processHandle = ProcessHandle.of(process.pid());
+                if (processHandle.isEmpty()) {
+                  log.error("Process " + process.pid() + " doesn't exist!!");
+                }
+              } catch (Exception e) {
+                log.error("Failed check process " + process, e);
+              }
+            });
+    log.debug("Processes: ");
+    ProcessHandle.allProcesses()
+        .filter(ph -> ph.info().command().isPresent() && ph.info().command().get().contains("yb-"))
+        .forEach(ph -> log.debug("PID: " + ph.pid() + " command: " + ph.info().command()));
   }
 
   private enum NodeState {
@@ -484,14 +504,14 @@ public class LocalNodeManager {
         value = replaceYbHome(value, userIntent, nodeInfo);
         gflags.put(key, value);
       }
-      if (!gflags.containsKey(GFlagsUtil.DEFAULT_MEMORY_LIMIT_TO_RAM_RATIO)
-          && serverType != UniverseTaskBase.ServerType.CONTROLLER) {
-        gflags.put(
-            GFlagsUtil.DEFAULT_MEMORY_LIMIT_TO_RAM_RATIO,
-            serverType == UniverseTaskBase.ServerType.TSERVER
-                ? MAX_MEM_RATIO_TSERVER
-                : MAX_MEM_RATIO_MASTER);
-      }
+      //      if (!gflags.containsKey(GFlagsUtil.DEFAULT_MEMORY_LIMIT_TO_RAM_RATIO)
+      //          && serverType != UniverseTaskBase.ServerType.CONTROLLER) {
+      //        gflags.put(
+      //            GFlagsUtil.DEFAULT_MEMORY_LIMIT_TO_RAM_RATIO,
+      //            serverType == UniverseTaskBase.ServerType.TSERVER
+      //                ? MAX_MEM_RATIO_TSERVER
+      //                : MAX_MEM_RATIO_MASTER);
+      //      }
       processCerts(args, nodeInfo, userIntent);
       writeGFlagsToFile(userIntent, gflags, serverType, nodeInfo);
     } catch (IOException e) {
