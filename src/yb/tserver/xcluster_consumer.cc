@@ -45,7 +45,7 @@
 #include "yb/rocksdb/util/rate_limiter.h"
 
 #include "yb/gutil/map-util.h"
-#include "yb/server/secure.h"
+#include "yb/rpc/secure.h"
 
 #include "yb/util/callsite_profiling.h"
 #include "yb/util/flags.h"
@@ -137,8 +137,8 @@ Result<std::unique_ptr<XClusterConsumerIf>> CreateXClusterConsumer(
   rpc::MessengerBuilder messenger_builder("xcluster-consumer");
 
   if (FLAGS_use_node_to_node_encryption) {
-    local_client->secure_context = VERIFY_RESULT(server::SetupSecureContext(
-        "", "", server::SecureContextType::kInternal, &messenger_builder));
+    local_client->secure_context = VERIFY_RESULT(rpc::SetupSecureContext(
+        /*root_dir=*/"", /*name=*/"", rpc::SecureContextType::kInternal, &messenger_builder));
   }
   local_client->messenger = VERIFY_RESULT(messenger_builder.Build());
 
@@ -529,8 +529,9 @@ void XClusterConsumer::TriggerPollForNewTablets() {
                   xcluster::GetOriginalReplicationGroupId(replication_group_id).ToString());
             }
 
-            auto secure_context_result = server::SetupSecureContext(
-                dir, "", "", server::SecureContextType::kInternal, &messenger_builder);
+            auto secure_context_result = rpc::SetupSecureContext(
+                dir, /*root_dir=*/"", /*name=*/"", rpc::SecureContextType::kInternal,
+                &messenger_builder);
             if (!secure_context_result.ok()) {
               LOG(WARNING) << "Could not create secure context for " << replication_group_id << ": "
                            << secure_context_result.status().ToString();
@@ -582,16 +583,18 @@ void XClusterConsumer::TriggerPollForNewTablets() {
 
         if (FLAGS_TEST_xcluster_enable_ddl_replication &&
             ddl_queue_streams_.contains(producer_tablet_info.stream_id)) {
-          auto namespace_info_res = get_namespace_info_func_(consumer_tablet_info.table_id);
+          auto namespace_info_res = get_namespace_info_func_(consumer_tablet_info.tablet_id);
           if (!namespace_info_res.ok()) {
-            LOG(WARNING) << "Could not get ddl_queue namespace info for " << replication_group_id
-                         << ": " << namespace_info_res.status().ToString();
-            continue;  // Don't finish creation.  Try again on the next RunThread().
+            // Consumer will handle clean up in next run of TriggerDeletionOfOldPollers.
+            xcluster_poller->MarkFailed(
+                Format("Could not find ddl_queue namespace info for $0", replication_group_id),
+                namespace_info_res.status());
+          } else {
+            const auto& [namespace_id, namespace_name] = *namespace_info_res;
+            xcluster_poller->InitDDLQueuePoller(
+                use_local_tserver, rate_limiter_.get(), namespace_name, namespace_id,
+                connect_to_pg_func_);
           }
-          const auto& [namespace_id, namespace_name] = *namespace_info_res;
-          xcluster_poller->InitDDLQueuePoller(
-              use_local_tserver, rate_limiter_.get(), namespace_name, namespace_id,
-              connect_to_pg_func_);
         } else {
           xcluster_poller->Init(use_local_tserver, rate_limiter_.get());
         }
@@ -734,9 +737,9 @@ int32_t XClusterConsumer::cluster_config_version() const {
 
 Status XClusterConsumer::ReloadCertificates() {
   if (local_client_->secure_context) {
-    RETURN_NOT_OK(server::ReloadSecureContextKeysAndCertificates(
+    RETURN_NOT_OK(rpc::ReloadSecureContextKeysAndCertificates(
         local_client_->secure_context.get(), "" /* node_name */, "" /* root_dir*/,
-        server::SecureContextType::kInternal));
+        rpc::SecureContextType::kInternal));
   }
 
   SharedLock read_lock(pollers_map_mutex_);
@@ -751,7 +754,7 @@ Status XClusterConsumer::ReloadCertificates() {
           FLAGS_certs_for_cdc_dir,
           xcluster::GetOriginalReplicationGroupId(replication_group_id).ToString());
     }
-    RETURN_NOT_OK(server::ReloadSecureContextKeysAndCertificates(
+    RETURN_NOT_OK(rpc::ReloadSecureContextKeysAndCertificates(
         client->secure_context.get(), cert_dir, "" /* node_name */));
   }
 
@@ -863,6 +866,22 @@ Status XClusterConsumer::ReportNewAutoFlagConfigVersion(
     const xcluster::ReplicationGroupId& replication_group_id, uint32_t new_version) const {
   return auto_flags_version_handler_->ReportNewAutoFlagConfigVersion(
       replication_group_id, new_version);
+}
+
+void XClusterConsumer::ClearAllClientMetaCaches() const {
+  std::lock_guard write_lock_pollers(pollers_map_mutex_);
+  for (auto& [group_id, xcluster_client] : remote_clients_) {
+    xcluster_client->client->ClearAllMetaCachesOnServer();
+  }
+}
+
+std::vector<std::shared_ptr<client::YBClient>> XClusterConsumer::GetYbClientsList() const {
+  SharedLock read_lock(pollers_map_mutex_);
+  std::vector<std::shared_ptr<client::YBClient>> result;
+  for (auto& [_, remote_client] : remote_clients_) {
+    result.push_back(remote_client->client);
+  }
+  return result;
 }
 
 }  // namespace tserver

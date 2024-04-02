@@ -19,6 +19,7 @@ import com.yugabyte.yw.commissioner.tasks.subtasks.AnsibleSetupServer;
 import com.yugabyte.yw.commissioner.tasks.subtasks.AnsibleUpdateNodeInfo;
 import com.yugabyte.yw.commissioner.tasks.subtasks.CheckClusterConsistency;
 import com.yugabyte.yw.commissioner.tasks.subtasks.CheckLeaderlessTablets;
+import com.yugabyte.yw.commissioner.tasks.subtasks.CheckNodesAreSafeToTakeDown;
 import com.yugabyte.yw.commissioner.tasks.subtasks.CheckUnderReplicatedTablets;
 import com.yugabyte.yw.commissioner.tasks.subtasks.DeleteClusterFromUniverse;
 import com.yugabyte.yw.commissioner.tasks.subtasks.InstanceActions;
@@ -30,7 +31,9 @@ import com.yugabyte.yw.commissioner.tasks.subtasks.UpdateClusterAPIDetails;
 import com.yugabyte.yw.commissioner.tasks.subtasks.UpdateNodeDetails;
 import com.yugabyte.yw.commissioner.tasks.subtasks.UpdateUniverseCommunicationPorts;
 import com.yugabyte.yw.commissioner.tasks.subtasks.UpdateUniverseIntent;
+import com.yugabyte.yw.commissioner.tasks.subtasks.ValidateNodeDiskSize;
 import com.yugabyte.yw.commissioner.tasks.subtasks.WaitForMasterLeader;
+import com.yugabyte.yw.commissioner.tasks.subtasks.WaitStartingFromTime;
 import com.yugabyte.yw.common.DnsManager;
 import com.yugabyte.yw.common.NodeManager;
 import com.yugabyte.yw.common.PlacementInfoUtil;
@@ -65,12 +68,14 @@ import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.Universe.UniverseUpdater;
 import com.yugabyte.yw.models.configs.CustomerConfig;
 import com.yugabyte.yw.models.helpers.CloudSpecificInfo;
+import com.yugabyte.yw.models.helpers.DeviceInfo;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.NodeDetails.MasterState;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import com.yugabyte.yw.models.helpers.NodeStatus;
 import com.yugabyte.yw.models.helpers.PlacementInfo;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -692,6 +697,7 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
                       (n.dedicatedTo == null || n.dedicatedTo != ServerType.TSERVER)
                           && Objects.equals(n.placementUuid, currentNode.placementUuid)
                           && !n.getNodeName().equals(currentNode.getNodeName())
+                          && n.getRegion().equals(currentNode.getRegion())
                           && n.getZone().equals(currentNode.getZone()))
               .collect(Collectors.toList());
       // This takes care of picking up the node that was previously selected.
@@ -1181,6 +1187,8 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
     params.assignPublicIP = cloudInfo.assignPublicIP;
     params.assignStaticPublicIP = userIntent.assignStaticPublicIP;
     params.setMachineImage(node.machineImage);
+    params.sshUserOverride = node.sshUserOverride;
+    params.sshPortOverride = node.sshPortOverride;
     params.setCmkArn(taskParams().getCmkArn());
     params.ipArnString = userIntent.awsArnString;
     params.useSpotInstance = userIntent.useSpotInstance;
@@ -1361,6 +1369,8 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
       params.placementUuid = node.placementUuid;
       // Add the node name.
       params.nodeName = node.nodeName;
+      // Set the node UUID.
+      params.nodeUuid = node.nodeUuid;
       // Add the universe uuid.
       params.setUniverseUUID(taskParams().getUniverseUUID());
       // Create the Ansible task to get the server info.
@@ -1406,20 +1416,6 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
               .get(NODE_NAME_KEY)
               .equals(cluster.userIntent.instanceTags.get(NODE_NAME_KEY))) {
             throw new IllegalArgumentException("'Name' tag value cannot be changed.");
-          }
-        }
-        if (cluster.userIntent.deviceInfo != null
-            && cluster.userIntent.deviceInfo.volumeSize != null
-            && cluster.userIntent.deviceInfo.numVolumes != null) {
-          int prevSize =
-              univCluster.userIntent.deviceInfo.volumeSize
-                  * univCluster.userIntent.deviceInfo.numVolumes;
-          int curSize =
-              cluster.userIntent.deviceInfo.volumeSize * cluster.userIntent.deviceInfo.numVolumes;
-          if (curSize < prevSize
-              && !confGetter.getConfForScope(universe, UniverseConfKeys.allowVolumeDecrease)) {
-            throw new IllegalArgumentException(
-                "Cannot decrease volume size from " + prevSize + " to " + curSize);
           }
         }
       }
@@ -1705,7 +1701,7 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
       tserverNodes.remove(stoppedNode);
       masterNodes.remove(stoppedNode);
     }
-    createMasterAddressUpdateTask(masterNodes, tserverNodes);
+    createMasterAddressUpdateTask(universe, masterNodes, tserverNodes);
 
     // Update the master addresses on the target universes whose source universe belongs to
     // this task.
@@ -1717,9 +1713,14 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
    * tservers and masters.
    */
   protected void createMasterAddressUpdateTask(
-      Set<NodeDetails> masterNodes, Set<NodeDetails> tserverNodes) {
+      Universe universe, Set<NodeDetails> masterNodes, Set<NodeDetails> tserverNodes) {
     // Configure all tservers to update the masters list as well.
-    createConfigureServerTasks(tserverNodes, params -> params.updateMasterAddrsOnly = true)
+    createConfigureServerTasks(
+            tserverNodes,
+            params -> {
+              params.updateMasterAddrsOnly = true;
+              params.masterAddrsOverride = getOrCreateExecutionContext().getMasterAddrsSupplier();
+            })
         .setSubTaskGroupType(SubTaskGroupType.UpdatingGFlags);
 
     // Change the master addresses in the conf file for the all masters to reflect
@@ -1729,6 +1730,7 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
             params -> {
               params.updateMasterAddrsOnly = true;
               params.isMaster = true;
+              params.masterAddrsOverride = getOrCreateExecutionContext().getMasterAddrsSupplier();
             })
         .setSubTaskGroupType(SubTaskGroupType.UpdatingGFlags);
 
@@ -1824,7 +1826,7 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
   /** Sets the task params from the DB. */
   public void fetchTaskDetailsFromDB() {
     TaskInfo taskInfo = TaskInfo.getOrBadRequest(getUserTaskUUID());
-    taskParams = Json.fromJson(taskInfo.getDetails(), UniverseDefinitionTaskParams.class);
+    taskParams = Json.fromJson(taskInfo.getTaskParams(), UniverseDefinitionTaskParams.class);
   }
 
   /**
@@ -1834,7 +1836,7 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
    */
   public void updateTaskDetailsInDB(UniverseDefinitionTaskParams taskParams) {
     getRunnableTask()
-        .setTaskDetails(
+        .setTaskParams(
             RedactingService.filterSecretFields(Json.toJson(taskParams), RedactionTarget.APIS));
   }
 
@@ -2265,6 +2267,8 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
                     params.isMaster = true;
                     params.resetMasterState = isShellMode;
                     params.ignoreUseCustomImageConfig = ignoreUseCustomImageConfig;
+                    params.masterAddrsOverride =
+                        getOrCreateExecutionContext().getMasterAddrsSupplier();
                   })
               .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
         });
@@ -2432,6 +2436,49 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
     return subTaskGroup;
   }
 
+  public void createValidateDiskSizeOnNodeRemovalTasks(
+      Universe universe, Cluster cluster, Set<NodeDetails> clusterNodes) {
+    if (config.getBoolean("yb.cloud.enabled")) {
+      // This is not enabled for cloud.
+      return;
+    }
+    int targetDiskUsagePercentage =
+        confGetter.getConfForScope(universe, UniverseConfKeys.targetNodeDiskUsagePercentage);
+    if (targetDiskUsagePercentage <= 0) {
+      log.info(
+          "Downsize disk size validation is disabled (usageMultiplierPercentage = {})",
+          targetDiskUsagePercentage);
+      return;
+    }
+    Set<NodeDetails> nodesToBeRemoved = PlacementInfoUtil.getNodesToBeRemoved(clusterNodes);
+    if (nodesToBeRemoved.isEmpty()) {
+      log.debug("No nodes are getting removed");
+      if (cluster.userIntent.providerType != CloudType.onprem) {
+        DeviceInfo taskDeviceInfo = cluster.userIntent.deviceInfo;
+        DeviceInfo existingDeviceInfo = universe.getCluster(cluster.uuid).userIntent.deviceInfo;
+        if (taskDeviceInfo == null
+            || existingDeviceInfo == null
+            || (Objects.equals(taskDeviceInfo.numVolumes, existingDeviceInfo.numVolumes)
+                && Objects.equals(taskDeviceInfo.volumeSize, existingDeviceInfo.volumeSize))) {
+          log.debug("No change in the volume configuration");
+          return;
+        }
+      }
+    }
+    SubTaskGroup validateSubTaskGroup =
+        createSubTaskGroup(
+            ValidateNodeDiskSize.class.getSimpleName(), SubTaskGroupType.ValidateConfigurations);
+    ValidateNodeDiskSize.Params params =
+        Json.fromJson(Json.toJson(taskParams()), ValidateNodeDiskSize.Params.class);
+    params.clusterUuid = cluster.uuid;
+    params.nodePrefix = universe.getUniverseDetails().nodePrefix;
+    params.targetDiskUsagePercentage = targetDiskUsagePercentage;
+    ValidateNodeDiskSize task = createTask(ValidateNodeDiskSize.class);
+    task.initialize(params);
+    validateSubTaskGroup.addSubTask(task);
+    getRunnableTask().addSubTaskGroup(validateSubTaskGroup);
+  }
+
   protected AnsibleConfigureServers getAnsibleConfigureServerTask(
       NodeDetails node,
       ServerType processType,
@@ -2593,6 +2640,7 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
       NodeDetails node,
       Set<ServerType> processTypes,
       SubTaskGroupType subGroupType,
+      boolean skipCheckNodesAreSafeToTakeDown,
       @Nullable String targetSoftwareVersion) {
     boolean underReplicatedTabletsCheckEnabled =
         confGetter.getConfForScope(
@@ -2600,6 +2648,19 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
     if (underReplicatedTabletsCheckEnabled && processTypes.contains(ServerType.TSERVER)) {
       createCheckUnderReplicatedTabletsTask(node, targetSoftwareVersion)
           .setSubTaskGroupType(subGroupType);
+    }
+    if (!skipCheckNodesAreSafeToTakeDown) {
+      List<NodeDetails> masters = new ArrayList<>();
+      List<NodeDetails> tservers = new ArrayList<>();
+      for (ServerType processType : processTypes) {
+        if (processType == ServerType.TSERVER) {
+          tservers.add(node);
+        }
+        if (processType == ServerType.MASTER) {
+          masters.add(node);
+        }
+      }
+      createCheckNodesAreSafeToTakeDownTask(masters, tservers, targetSoftwareVersion);
     }
   }
 
@@ -2731,5 +2792,57 @@ public abstract class UniverseDefinitionTaskBase extends UniverseTaskBase {
       subTaskGroup.addSubTask(checkLeaderlessTablets);
       getRunnableTask().addSubTaskGroup(subTaskGroup);
     }
+  }
+
+  protected void createCheckNodesAreSafeToTakeDownTask(
+      List<NodeDetails> masters, List<NodeDetails> tservers, String targetSoftwareVersion) {
+    if (CollectionUtils.isEmpty(masters) && CollectionUtils.isEmpty(tservers)) {
+      return;
+    }
+    if (confGetter.getConfForScope(getUniverse(), UniverseConfKeys.useNodesAreSafeToTakeDown)) {
+      SubTaskGroup subTaskGroup = createSubTaskGroup("CheckNodesAreSafeToTakeDown");
+      subTaskGroup.setSubTaskGroupType(SubTaskGroupType.PreflightChecks);
+      CheckNodesAreSafeToTakeDown.Params params = new CheckNodesAreSafeToTakeDown.Params();
+      params.setUniverseUUID(taskParams().getUniverseUUID());
+      params.masters = new ArrayList<>(masters);
+      params.tservers = new ArrayList<>(tservers);
+      params.targetSoftwareVersion = targetSoftwareVersion;
+
+      CheckNodesAreSafeToTakeDown checkNodesAreSafeToTakeDown =
+          createTask(CheckNodesAreSafeToTakeDown.class);
+      checkNodesAreSafeToTakeDown.initialize(params);
+      subTaskGroup.addSubTask(checkNodesAreSafeToTakeDown);
+      getRunnableTask().addSubTaskGroup(subTaskGroup);
+    }
+  }
+
+  protected SubTaskGroup createSleepAfterStartupTask(
+      UUID universeUUID, Collection<ServerType> processTypes, String dateKey) {
+    int sleepTime =
+        processTypes.stream()
+            .filter(p -> p != ServerType.CONTROLLER)
+            .mapToInt(this::getSleepTimeForProcess)
+            .max()
+            .orElse(-1);
+    return createSleepAfterStartupTask(universeUUID, processTypes, dateKey, sleepTime);
+  }
+
+  protected SubTaskGroup createSleepAfterStartupTask(
+      UUID universeUUID, Collection<ServerType> processTypes, String dateKey, long sleepTime) {
+    if (sleepTime <= 0) {
+      log.debug("Skipping wait for processes {}", processTypes);
+      return null;
+    }
+    SubTaskGroup subTaskGroup = createSubTaskGroup("WaitUntilTime");
+    WaitStartingFromTime.Params params = new WaitStartingFromTime.Params();
+    params.setUniverseUUID(universeUUID);
+    params.sleepTime = sleepTime;
+    params.dateKey = dateKey;
+
+    WaitStartingFromTime task = createTask(WaitStartingFromTime.class);
+    task.initialize(params);
+    subTaskGroup.addSubTask(task);
+    getRunnableTask().addSubTaskGroup(subTaskGroup);
+    return subTaskGroup;
   }
 }

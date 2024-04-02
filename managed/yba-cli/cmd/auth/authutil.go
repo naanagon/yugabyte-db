@@ -22,7 +22,7 @@ func authWriteConfigFile(r ybaclient.SessionInfo) {
 	err := viper.WriteConfig()
 	if err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-			fmt.Fprintln(os.Stdout, "No config was found a new one will be created.")
+			fmt.Fprintln(os.Stdout, "No config was found a new one will be created.\n")
 			//Try to create the file
 			err = viper.SafeWriteConfig()
 			if err != nil {
@@ -63,7 +63,7 @@ func authWriteConfigFile(r ybaclient.SessionInfo) {
 func authUtil(url *url.URL, apiToken string) {
 	authAPI, err := ybaAuthClient.NewAuthAPIClientInitialize(url, apiToken)
 	if err != nil {
-		logrus.Fatal(formatter.Colorize(err.Error(), formatter.RedColor))
+		logrus.Fatal(formatter.Colorize(err.Error()+"\n", formatter.RedColor))
 	}
 	r, response, err := authAPI.GetSessionInfo().Execute()
 	if err != nil {
@@ -74,6 +74,8 @@ func authUtil(url *url.URL, apiToken string) {
 
 	}
 	logrus.Debugf("Session Info response without errors\n")
+
+	authAPI.IsCLISupported()
 
 	// Fetch Customer UUID
 	err = authAPI.GetCustomerUUID()

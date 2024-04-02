@@ -47,7 +47,10 @@ DECLARE_bool(ysql_yb_enable_replication_commands);
 DECLARE_uint32(cdcsdk_retention_barrier_no_revision_interval_secs);
 DECLARE_int32(cleanup_split_tablets_interval_sec);
 DECLARE_string(allowed_preview_flags_csv);
-DECLARE_bool(ysql_ddl_rollback_enabled);
+DECLARE_bool(ysql_yb_enable_ddl_atomicity_infra);
+DECLARE_bool(ysql_yb_ddl_rollback_enabled);
+DECLARE_bool(ysql_enable_pack_full_row_update);
+DECLARE_bool(ysql_yb_enable_replica_identity);
 
 namespace yb {
 using client::YBClient;
@@ -126,6 +129,7 @@ class CDCSDKTestBase : public YBTest {
     ANNOTATE_UNPROTECTED_WRITE(FLAGS_flush_rocksdb_on_shutdown) = false;
 
     ANNOTATE_UNPROTECTED_WRITE(FLAGS_ysql_yb_enable_replication_commands) = true;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_ysql_yb_enable_replica_identity) = true;
 
     ANNOTATE_UNPROTECTED_WRITE(FLAGS_cdcsdk_retention_barrier_no_revision_interval_secs) = 0;
 
@@ -215,6 +219,10 @@ class CDCSDKTestBase : public YBTest {
   Result<xrepl::StreamId> CreateDBStreamWithReplicationSlot(
       const std::string& replication_slot_name, CDCRecordType record_type = CDCRecordType::CHANGE);
 
+  Result<xrepl::StreamId> CreateConsistentSnapshotStreamWithReplicationSlot(
+      const std::string& replication_slot_name,
+      CDCSDKSnapshotOption snapshot_option = CDCSDKSnapshotOption::USE_SNAPSHOT,
+      bool verify_snapshot_name = false);
   Result<xrepl::StreamId> CreateConsistentSnapshotStreamWithReplicationSlot(
       CDCSDKSnapshotOption snapshot_option = CDCSDKSnapshotOption::USE_SNAPSHOT,
       bool verify_snapshot_name = false);

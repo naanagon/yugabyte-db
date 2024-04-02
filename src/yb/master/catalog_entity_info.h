@@ -83,8 +83,7 @@ struct ExternalTableSnapshotData {
   size_t num_tablets = 0;
   typedef std::pair<std::string, std::string> PartitionKeys;
   typedef std::map<PartitionKeys, TabletId> PartitionToIdMap;
-  typedef std::vector<PartitionPB> Partitions;
-  Partitions partitions;
+  std::vector<std::pair<TabletId, PartitionPB>> old_tablets;
   PartitionToIdMap new_tablets_map;
   // Mapping: Old tablet ID -> New tablet ID.
   std::optional<ImportSnapshotMetaResponsePB::TableMetaPB> table_meta = std::nullopt;
@@ -164,6 +163,8 @@ struct TabletReplica {
   TabletLeaderLeaseInfo leader_lease_info;
 
   FullCompactionStatus full_compaction_status;
+
+  uint32_t last_attempted_clone_seq_no;
 
   TabletReplica() : time_updated(MonoTime::Now()) {}
 
@@ -357,6 +358,8 @@ class TabletInfo : public RefCountedThreadSafe<TabletInfo>,
   // Only used when FLAGS_use_parent_table_id_field is set.
   std::vector<TableId> table_ids_ GUARDED_BY(lock_);
 
+  uint32_t last_attempted_clone_seq_no_ GUARDED_BY(lock_) = 0;
+
   DISALLOW_COPY_AND_ASSIGN(TabletInfo);
 };
 
@@ -471,6 +474,10 @@ struct PersistentTableInfo : public Persistent<SysTablesEntryPB, SysRowEntryType
   }
 
   Result<bool> is_being_modified_by_ddl_transaction(const TransactionId& txn) const;
+
+  // Returns the transaction-id of the DDL transaction operating on it, Nil if no such DDL is
+  // happening.
+  Result<TransactionId> GetCurrentDdlTransactionId() const;
 
   const std::string& state_name() const {
     return SysTablesEntryPB_State_Name(pb.state());
@@ -734,6 +741,12 @@ class TableInfo : public RefCountedThreadSafe<TableInfo>,
 
   bool AttachedYCQLIndexDeletionInProgress(const TableId& index_table_id) const;
 
+  void AddDdlTxnWaitingForSchemaVersion(int schema_version,
+                                        const TransactionId& txn) EXCLUDES(lock_);
+
+  std::vector<TransactionId> EraseDdlTxnsWaitingForSchemaVersion(
+      int schema_version) EXCLUDES(lock_);
+
  private:
   friend class RefCountedThreadSafe<TableInfo>;
   ~TableInfo();
@@ -784,6 +797,12 @@ class TableInfo : public RefCountedThreadSafe<TableInfo>,
   // This field denotes the table is under xcluster bootstrapping. This is used to prevent create
   // table from completing. Not needed once D23712 lands.
   std::atomic_bool bootstrapping_xcluster_replication_ = false;
+
+  // Store a map of schema version->TransactionId of the DDL transaction that initiated the
+  // change. When a schema version n has propagated to all tablets, we use this map to signal all
+  // the DDL transactions waiting for schema version n and any k < n. The map is ordered by schema
+  // version to easily figure out all the entries for schema version < n.
+  std::map<int, TransactionId> ddl_txns_waiting_for_schema_version_ GUARDED_BY(lock_);
 
   DISALLOW_COPY_AND_ASSIGN(TableInfo);
 };
@@ -856,6 +875,8 @@ class NamespaceInfo : public RefCountedThreadSafe<NamespaceInfo>,
   ::yb::master::SysNamespaceEntryPB_State state() const;
 
   std::string ToString() const override;
+
+  uint32_t FetchAndIncrementCloneSeqNo();
 
  private:
   friend class RefCountedThreadSafe<NamespaceInfo>;
@@ -1142,7 +1163,12 @@ class CDCStreamInfo : public RefCountedThreadSafe<CDCStreamInfo>,
 
   bool IsConsistentSnapshotStream() const;
 
+  const google::protobuf::Map<::std::string, ::yb::PgReplicaIdentity> GetReplicaIdentityMap() const;
+
   std::string ToString() const override;
+
+  bool IsXClusterStream() const;
+  bool IsCDCSDKStream() const;
 
  private:
   friend class RefCountedThreadSafe<CDCStreamInfo>;

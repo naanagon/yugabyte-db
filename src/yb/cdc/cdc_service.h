@@ -21,7 +21,6 @@
 #include "yb/cdc/cdc_service.service.h"
 #include "yb/cdc/cdc_types.h"
 #include "yb/cdc/cdc_util.h"
-#include "yb/client/async_initializer.h"
 
 #include "yb/master/master_client.fwd.h"
 
@@ -81,7 +80,6 @@ static const char* const kCheckpointType = "checkpoint_type";
 static const char* const kStreamState = "state";
 static const char* const kNamespaceId = "NAMESPACEID";
 static const char* const kCDCSDKSnapshotDoneKey = "snapshot_done_key";
-static const char* const kCDCSDKSlotEntryTabletId = "dummy_id_for_replication_slot";
 
 struct TabletCheckpoint {
   OpId op_id;
@@ -150,6 +148,14 @@ class CDCServiceImpl : public CDCServiceIf {
 
   void DestroyVirtualWALForCDC(
       const DestroyVirtualWALForCDCRequestPB* req, DestroyVirtualWALForCDCResponsePB* resp,
+      rpc::RpcContext context) override;
+
+  // Destroy a batch of Virtual WAL instances managed by this CDC service.
+  // Intended to be called from background jobs and hence only logs warnings in case of errors.
+  void DestroyVirtualWALBatchForCDC(const std::vector<uint64_t>& session_ids);
+
+  void UpdateAndPersistLSN(
+      const UpdateAndPersistLSNRequestPB* req, UpdateAndPersistLSNResponsePB* resp,
       rpc::RpcContext context) override;
 
   Result<TabletCheckpoint> TEST_GetTabletInfoFromCache(const TabletStreamInfo& producer_tablet);
@@ -428,6 +434,10 @@ class CDCServiceImpl : public CDCServiceIf {
   void FilterOutTabletsToBeDeletedByAllStreams(
       TabletIdCDCCheckpointMap* tablet_checkpoint_map,
       std::unordered_set<TabletId>* tablet_ids_with_max_checkpoint);
+
+  Result<bool> CheckBeforeImageActive(
+      const TabletId& tablet_id, const StreamMetadata& stream_metadata,
+      const tablet::TabletPeerPtr& tablet_peer);
 
   Result<TabletIdCDCCheckpointMap> PopulateTabletCheckPointInfo(
       const TabletId& input_tablet_id = "",

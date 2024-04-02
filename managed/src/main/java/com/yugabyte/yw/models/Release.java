@@ -2,6 +2,7 @@ package com.yugabyte.yw.models;
 
 import static play.mvc.Http.Status.BAD_REQUEST;
 
+import com.yugabyte.yw.cloud.PublicCloudConstants.Architecture;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.controllers.apiModels.CreateRelease;
 import io.ebean.DB;
@@ -18,6 +19,7 @@ import java.text.DateFormat;
 import java.text.ParseException;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import lombok.Getter;
 import lombok.Setter;
@@ -54,6 +56,7 @@ public class Release extends Model {
   public enum ReleaseState {
     ACTIVE,
     DISABLED,
+    INCOMPLETE,
     DELETED
   }
 
@@ -73,7 +76,7 @@ public class Release extends Model {
     release.version = version;
     release.releaseType = releaseType;
     release.yb_type = YbType.YBDB;
-    release.state = ReleaseState.ACTIVE;
+    release.state = ReleaseState.INCOMPLETE;
     release.save();
     return release;
   }
@@ -103,7 +106,7 @@ public class Release extends Model {
       }
     }
     release.releaseNotes = reqRelease.release_notes;
-    release.state = ReleaseState.ACTIVE;
+    release.state = ReleaseState.INCOMPLETE;
 
     release.save();
     return release;
@@ -117,6 +120,15 @@ public class Release extends Model {
     return find.all();
   }
 
+  public static List<Release> getAllWithArtifactType(
+      ReleaseArtifact.Platform plat, Architecture arch) {
+    List<ReleaseArtifact> artifacts = ReleaseArtifact.getAllPlatformArchitecture(plat, arch);
+    return find.query()
+        .where()
+        .idIn(artifacts.stream().map(a -> a.getReleaseUUID()).toArray())
+        .findList();
+  }
+
   public static Release getOrBadRequest(UUID releaseUUID) {
     Release release = get(releaseUUID);
     if (release == null) {
@@ -126,12 +138,42 @@ public class Release extends Model {
     return release;
   }
 
+  public static Release getByVersion(String version) {
+    // TODO: Need to map between version and tag.
+    return find.query().where().eq("version", version).findOne();
+  }
+
   public void addArtifact(ReleaseArtifact artifact) {
+    if (ReleaseArtifact.getForReleaseMatchingType(
+            releaseUUID, artifact.getPlatform(), artifact.getArchitecture())
+        != null) {
+      throw new PlatformServiceException(
+          BAD_REQUEST,
+          String.format(
+              "artifact matching platform %s and architecture %s already exists",
+              artifact.getPlatform(), artifact.getArchitecture()));
+    }
     artifact.setReleaseUUID(releaseUUID);
+
+    // Move the state from incomplete to active when adding a Linux type. Kubernetes artifacts
+    // are not sufficient to make a release move into the "active" state.
+    if (artifact.getPlatform() == ReleaseArtifact.Platform.LINUX
+        && this.state == ReleaseState.INCOMPLETE) {
+      state = ReleaseState.ACTIVE;
+      save();
+    }
   }
 
   public List<ReleaseArtifact> getArtifacts() {
     return ReleaseArtifact.getForRelease(releaseUUID);
+  }
+
+  public ReleaseArtifact getArtifactForArchitecture(Architecture arch) {
+    return ReleaseArtifact.getForReleaseArchitecture(releaseUUID, arch);
+  }
+
+  public ReleaseArtifact getKubernetesArtifact() {
+    return ReleaseArtifact.getForReleaseKubernetesArtifact(releaseUUID);
   }
 
   public void setReleaseTag(String tag) {
@@ -150,6 +192,10 @@ public class Release extends Model {
   }
 
   public void setState(ReleaseState state) {
+    if (this.state == ReleaseState.INCOMPLETE) {
+      throw new PlatformServiceException(
+          BAD_REQUEST, "cannot update release state from 'INCOMPLETE'");
+    }
     this.state = state;
     save();
   }
@@ -158,16 +204,38 @@ public class Release extends Model {
   public boolean delete() {
     try (Transaction transaction = DB.beginTransaction()) {
       for (ReleaseArtifact artifact : getArtifacts()) {
-        log.debug("cascading delete to artifact {}", artifact.getArtifactUUID());
+        ReleaseLocalFile rlf = null;
+        if (artifact.getPackageFileID() != null) {
+          rlf = ReleaseLocalFile.get(artifact.getPackageFileID());
+        }
+        log.debug(
+            "Release {}: cascading delete to artifact {}", releaseUUID, artifact.getArtifactUUID());
         if (!artifact.delete()) {
+          log.error(
+              String.format(
+                  "Release %s: failed to delete artifact %s",
+                  releaseUUID, artifact.getArtifactUUID()));
+          return false;
+        }
+        if (rlf != null && !rlf.delete()) {
+          log.error(
+              String.format(
+                  "Release %s: failed to delete ReleaseLocalFile %s:%s",
+                  releaseUUID, rlf.getFileUUID(), rlf.getLocalFilePath()));
           return false;
         }
       }
       if (!super.delete()) {
+        log.error("failed to delete release " + releaseUUID);
         return false;
       }
       transaction.commit();
     }
     return true;
+  }
+
+  public Set<Universe> getUniverses() {
+    String formattedVersion = this.version;
+    return Universe.universeDetailsIfReleaseExists(formattedVersion);
   }
 }

@@ -11,7 +11,7 @@ import { DeploymentStatus } from './ReleaseDeploymentStatus';
 import { AddReleaseModal } from './ReleaseDialogs/AddReleaseModal';
 import { EditArchitectureModal } from './ReleaseDialogs/EditArchitectureModal';
 import { EditReleaseTagModal } from './ReleaseDialogs/EditReleaseTagModal';
-import { DisableReleaseModal } from './ReleaseDialogs/DisableReleaseModal';
+import { ModifyReleaseStateModal } from './ReleaseDialogs/ModifyReleaseStateModal';
 import { DeleteReleaseModal } from './ReleaseDialogs/DeleteReleaseModal';
 import { YBButton, YBCheckbox } from '../../../components';
 import { YBPanelItem } from '../../../../components/panels';
@@ -208,11 +208,14 @@ export const NewReleaseList = () => {
   const formatVersion = (cell: any, row: any) => {
     return (
       <Box className={clsx(helperClasses.flexRow, helperClasses.alignText)}>
-        <span className={helperClasses.versionText}>{row.version}</span>
+        <span data-testid={'ReleaseList-VersionText'} className={helperClasses.versionText}>
+          {row.version}
+        </span>
         {isNonEmptyString(row.release_tag) && (
           <>
             <Box className={helperClasses.releaseTagBox}>
               <span
+                data-testid={'ReleaseList-ReleaseTag'}
                 className={clsx(helperClasses.releaseTagText, helperClasses.smallerReleaseText)}
               >
                 {row.release_tag.length > MAX_RELEASE_TAG_CHAR
@@ -245,9 +248,9 @@ export const NewReleaseList = () => {
     return (
       <Box className={helperClasses.flexRow}>
         <span className={helperClasses.biggerReleaseText}>
-          {row.in_use ? 'In Use' : 'Not in Use'}
+          {row.universes?.length > 0 ? 'In Use' : 'Not in Use'}
         </span>
-        {row.in_use && (
+        {row.universes?.length > 0 && (
           <Box className={helperClasses.releaseNumUniversesBox}>
             <span className={helperClasses.smallerReleaseText}>{row.universes.length}</span>
           </Box>
@@ -273,11 +276,13 @@ export const NewReleaseList = () => {
         {row.artifacts.length < 3 && (
           <YBButton
             className={helperClasses.overrideMuiStartIcon}
-            onClick={() => {
+            onClick={(e: any) => {
               setSelectedReleaseDetails(row);
               onNewReleaseButtonClick();
               onSetModalTitle(ModalTitle.ADD_ARCHITECTURE);
+              e.stopPropagation();
             }}
+            data-testid="ReleaseList-AddArchitectureButton"
             startIcon={<Add />}
             variant="secondary"
           ></YBButton>
@@ -345,7 +350,9 @@ export const NewReleaseList = () => {
             value={value}
             onClick={(e: any) => {
               onActionClick(value, row);
+              e.stopPropagation();
             }}
+            data-testid={`ReleaseList-Action${value}`}
           >
             {value}
           </MenuItem>
@@ -364,7 +371,9 @@ export const NewReleaseList = () => {
           value={action}
           onClick={(e: any) => {
             onActionClick(action, row);
+            e.stopPropagation();
           }}
+          data-testid={`ReleaseList-Action${action}`}
         >
           {action}
         </MenuItem>
@@ -389,7 +398,9 @@ export const NewReleaseList = () => {
           value={value}
           onClick={(e: any) => {
             onActionClick(value, row);
+            e.stopPropagation();
           }}
+          data-testid={`ReleaseList-Action${value}`}
         >
           {value}
         </MenuItem>
@@ -401,7 +412,13 @@ export const NewReleaseList = () => {
 
   const formatActionButtons = (cell: any, row: any) => {
     return (
-      <DropdownButton title="Actions" id="release-list-actions" pullRight={false}>
+      <DropdownButton
+        key={`release-list-actions-${row.release_uuid}`}
+        title="Actions"
+        id="release-list-actions"
+        pullRight={false}
+        onClick={(e) => e.stopPropagation()}
+      >
         {getMenuItemsActions(row)}
       </DropdownButton>
     );
@@ -451,7 +468,7 @@ export const NewReleaseList = () => {
     setOpenSidePanel(false);
   };
 
-  const onRowDoubleClick = (row: any, event: any) => {
+  const onRowClick = (row: any, event: any) => {
     setSelectedReleaseDetails(row);
     setOpenSidePanel(true);
   };
@@ -508,6 +525,7 @@ export const NewReleaseList = () => {
           <Box mt={2}>
             <Box className={clsx(helperClasses.floatBoxLeft, helperClasses.flexRow)} mt={2}>
               <YBSearchInput
+                data-testid="ReleaseList-SearchReleaseVersion"
                 className={helperClasses.searchInput}
                 defaultValue={searchText}
                 onValueChanged={(e: React.ChangeEvent<HTMLInputElement>) => {
@@ -562,6 +580,7 @@ export const NewReleaseList = () => {
                     helperClasses.refreshButton,
                     helperClasses.overrideMuiRefreshIcon
                   )}
+                  data-testid="ReleaseList-RefreshReleasesButton"
                   size="large"
                   startIcon={<Refresh />}
                   variant="secondary"
@@ -572,6 +591,7 @@ export const NewReleaseList = () => {
                 <YBButton
                   size="large"
                   variant={'primary'}
+                  data-testid="ReleaseList-AddReleaseButton"
                   startIcon={<Add />}
                   onClick={onNewReleaseButtonClick}
                 >
@@ -597,7 +617,7 @@ export const NewReleaseList = () => {
               data={filteredReleaseList}
               pagination={true}
               options={{
-                onRowDoubleClick: onRowDoubleClick
+                onRowClick: onRowClick
               }}
             >
               <TableHeaderColumn dataField={'release_uuid'} isKey={true} hidden={true} />
@@ -692,7 +712,7 @@ export const NewReleaseList = () => {
         />
       )}
       {showDisableReleaseDialog && selectedReleaseDetails && (
-        <DisableReleaseModal
+        <ModifyReleaseStateModal
           open={showDisableReleaseDialog}
           onActionPerformed={onActionPerformed}
           onClose={onDisableReleaseDialogClose}

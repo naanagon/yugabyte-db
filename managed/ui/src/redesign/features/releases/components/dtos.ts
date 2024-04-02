@@ -7,7 +7,6 @@ export interface Releases {
   artifacts: ReleaseArtifacts[];
   release_type: ReleaseType | string,
   release_date: string;
-  in_use: boolean;
   release_notes: string;
   state: ReleaseState;
   universes: ReleaseUniverses[];
@@ -44,13 +43,15 @@ export enum ReleaseType {
   ALL = 'All',
   STS = 'STS',
   LTS = 'LTS',
-  PREVIEW = 'PREVIEW (DEFAULT)'
+  PREVIEW_DEFAULT = 'PREVIEW (DEFAULT)',
+  PREVIEW = 'PREVIEW'
 }
 
 export enum ReleaseState {
   ACTIVE =  'ACTIVE',
   DISABLED = 'DISABLED',
-  DELETED = 'DELETED'
+  DELETED = 'DELETED',
+  INCOMPLETE = 'INCOMPLETE'
 }
 
 export enum UrlArtifactStatus {

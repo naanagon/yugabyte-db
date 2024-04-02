@@ -11,6 +11,7 @@ import com.nimbusds.openid.connect.sdk.op.OIDCProviderMetadata;
 import com.typesafe.config.Config;
 import com.yugabyte.yw.cloud.CloudModules;
 import com.yugabyte.yw.cloud.aws.AWSInitializer;
+import com.yugabyte.yw.commissioner.AutomatedMasterFailover;
 import com.yugabyte.yw.commissioner.BackupGarbageCollector;
 import com.yugabyte.yw.commissioner.CallHome;
 import com.yugabyte.yw.commissioner.DefaultExecutorServiceProvider;
@@ -40,6 +41,7 @@ import com.yugabyte.yw.common.PlatformScheduler;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.common.PrometheusConfigHelper;
 import com.yugabyte.yw.common.PrometheusConfigManager;
+import com.yugabyte.yw.common.ReleaseContainerFactory;
 import com.yugabyte.yw.common.ReleaseManager;
 import com.yugabyte.yw.common.ReleasesUtils;
 import com.yugabyte.yw.common.ShellKubernetesManager;
@@ -145,6 +147,7 @@ public class MainModule extends AbstractModule {
 
     Security.addProvider(new PemKeyStoreProvider());
     Security.addProvider(new BouncyCastleProvider());
+    TLSConfig.modifyTLSDisabledAlgorithms(config);
     bind(RuntimeConfigFactory.class).to(SettableRuntimeConfigFactory.class).asEagerSingleton();
     install(new CustomerConfKeys());
     install(new ProviderConfKeys());
@@ -188,6 +191,7 @@ public class MainModule extends AbstractModule {
     bind(HealthChecker.class).asEagerSingleton();
     bind(TaskGarbageCollector.class).asEagerSingleton();
     bind(PitrConfigPoller.class).asEagerSingleton();
+    bind(AutomatedMasterFailover.class).asEagerSingleton();
     bind(BackupGarbageCollector.class).asEagerSingleton();
     bind(SupportBundleCleanup.class).asEagerSingleton();
     bind(EncryptionAtRestManager.class).asEagerSingleton();
@@ -227,6 +231,7 @@ public class MainModule extends AbstractModule {
     bind(YBInformerFactory.class).asEagerSingleton();
     bind(YBReconcilerFactory.class).asEagerSingleton();
     bind(ReleasesUtils.class).asEagerSingleton();
+    bind(ReleaseContainerFactory.class).asEagerSingleton();
 
     requestStaticInjection(CertificateInfo.class);
     requestStaticInjection(HealthCheck.class);

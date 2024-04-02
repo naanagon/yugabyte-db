@@ -216,6 +216,25 @@ public class GFlagsUtil {
           .build();
 
   /**
+   * Returns true if we should use secondary ip for node (in case of dual NIC)
+   *
+   * @param universe
+   * @param node
+   * @param cloudEnabled
+   * @return
+   */
+  public static boolean isUseSecondaryIP(
+      Universe universe, NodeDetails node, boolean cloudEnabled) {
+    boolean legacyNet =
+        universe.getConfig().getOrDefault(Universe.DUAL_NET_LEGACY, "true").equals("true");
+    boolean isDualNet =
+        cloudEnabled
+            && node.cloudInfo.secondary_private_ip != null
+            && !node.cloudInfo.secondary_private_ip.equals("null");
+    return isDualNet && !legacyNet;
+  }
+
+  /**
    * Return the map of default gflags which will be passed as extra gflags to the db nodes.
    *
    * @param taskParam
@@ -256,14 +275,14 @@ public class GFlagsUtil {
       extra_gflags.put(LEADER_FAILURE_MAX_MISSED_HEARTBEAT_PERIODS, String.valueOf(5));
     }
 
+    boolean cloudEnabled = config.getBoolean("yb.cloud.enabled");
     NodeDetails node = universe.getNode(taskParam.nodeName);
-    boolean legacyNet =
-        universe.getConfig().getOrDefault(Universe.DUAL_NET_LEGACY, "true").equals("true");
     boolean isDualNet =
-        config.getBoolean("yb.cloud.enabled")
+        cloudEnabled
             && node.cloudInfo.secondary_private_ip != null
             && !node.cloudInfo.secondary_private_ip.equals("null");
-    boolean useSecondaryIp = isDualNet && !legacyNet;
+
+    boolean useSecondaryIp = isUseSecondaryIP(universe, node, cloudEnabled);
 
     if (node.dedicatedTo != null) {
       extra_gflags.put(
@@ -487,6 +506,15 @@ public class GFlagsUtil {
     return Provider.getOrBadRequest(UUID.fromString(providerUUID)).getYbHome();
   }
 
+  private static String getMasterAddrs(
+      AnsibleConfigureServers.Params taskParam, Universe universe, boolean useSecondaryIp) {
+    String masterAddresses = taskParam.getMasterAddrsOverride();
+    if (StringUtils.isBlank(masterAddresses)) {
+      masterAddresses = universe.getMasterAddresses(false, useSecondaryIp);
+    }
+    return masterAddresses;
+  }
+
   private static Map<String, String> getTServerDefaultGflags(
       AnsibleConfigureServers.Params taskParam,
       Universe universe,
@@ -497,7 +525,7 @@ public class GFlagsUtil {
       boolean configureCGroup) {
     Map<String, String> gflags = new TreeMap<>();
     NodeDetails node = universe.getNode(taskParam.nodeName);
-    String masterAddresses = universe.getMasterAddresses(false, useSecondaryIp);
+    String masterAddresses = getMasterAddrs(taskParam, universe, useSecondaryIp);
     String privateIp = node.cloudInfo.private_ip;
     int tserverRpcPort =
         taskParam.overrideNodePorts
@@ -829,7 +857,7 @@ public class GFlagsUtil {
       RuntimeConfGetter confGetter) {
     Map<String, String> gflags = new TreeMap<>();
     NodeDetails node = universe.getNode(taskParam.nodeName);
-    String masterAddresses = universe.getMasterAddresses(false, useSecondaryIp);
+    String masterAddresses = getMasterAddrs(taskParam, universe, useSecondaryIp);
     String privateIp = node.cloudInfo.private_ip;
     int masterRpcPort =
         taskParam.overrideNodePorts

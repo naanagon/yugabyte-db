@@ -591,6 +591,26 @@ public class Universe extends Model {
   }
 
   /**
+   * Returns details about a single node by ip address in the universe.
+   *
+   * @param nodeIP Private or Secondary private IP address of the node
+   * @return details about a node, null if it does not exist.
+   */
+  public NodeDetails getNodeByAnyIP(String nodeIP) {
+    if (StringUtils.isBlank(nodeIP)) {
+      return null;
+    }
+    for (NodeDetails node : getNodes()) {
+      if (node.cloudInfo != null
+          && (Objects.equals(nodeIP, node.cloudInfo.private_ip)
+              || Objects.equals(nodeIP, node.cloudInfo.secondary_private_ip))) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Returns the list of masters for this universe.
    *
    * @return a list of master nodes
@@ -867,14 +887,17 @@ public class Universe extends Model {
     return port;
   }
 
-  private String getHostPortsString(
-      List<NodeDetails> serverNodes, ServerType type, PortType portType) {
+  public String getHostPortsString(
+      Collection<NodeDetails> serverNodes, ServerType type, PortType portType) {
     return getHostPortsString(serverNodes, type, portType, false);
   }
 
   // Helper API to create the based on the server type.
   private String getHostPortsString(
-      List<NodeDetails> serverNodes, ServerType type, PortType portType, boolean getSecondary) {
+      Collection<NodeDetails> serverNodes,
+      ServerType type,
+      PortType portType,
+      boolean getSecondary) {
     StringBuilder servers = new StringBuilder();
     for (NodeDetails node : serverNodes) {
       // Only get secondary if dual net legacy is false.

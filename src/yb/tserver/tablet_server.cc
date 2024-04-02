@@ -38,7 +38,6 @@
 #include <thread>
 #include <utility>
 
-#include "yb/client/client.h"
 #include "yb/client/client_fwd.h"
 #include "yb/client/transaction_manager.h"
 #include "yb/client/universe_key_client.h"
@@ -66,10 +65,12 @@
 #include "yb/rpc/yb_rpc.h"
 #include "yb/rpc/secure_stream.h"
 
+#include "yb/server/async_client_initializer.h"
 #include "yb/server/rpc_server.h"
-#include "yb/server/secure.h"
+#include "yb/rpc/secure.h"
 #include "yb/server/webserver.h"
 #include "yb/server/hybrid_clock.h"
+#include "yb/server/ycql_stat_provider.h"
 
 #include "yb/tablet/maintenance_manager.h"
 #include "yb/tablet/tablet_peer.h"
@@ -85,8 +86,10 @@
 #include "yb/tserver/tserver-path-handlers.h"
 #include "yb/tserver/tserver_auto_flags_manager.h"
 #include "yb/tserver/tserver_service.proxy.h"
+#include "yb/tserver/tserver_xcluster_context.h"
 #include "yb/tserver/xcluster_consumer_if.h"
 #include "yb/tserver/backup_service.h"
+#include "yb/tserver/pg_client.pb.h"
 
 #include "yb/cdc/cdc_service.h"
 #include "yb/cdc/cdc_service_context.h"
@@ -117,23 +120,10 @@ using namespace std::literals;
 using namespace yb::size_literals;
 using namespace std::placeholders;
 
-DEFINE_UNKNOWN_int32(tablet_server_svc_num_threads, -1,
-             "Number of RPC worker threads for the TS service. If -1, it is auto configured.");
-TAG_FLAG(tablet_server_svc_num_threads, advanced);
-
-DEFINE_UNKNOWN_int32(ts_admin_svc_num_threads, 10,
-             "Number of RPC worker threads for the TS admin service");
-TAG_FLAG(ts_admin_svc_num_threads, advanced);
-
-DEFINE_UNKNOWN_int32(ts_consensus_svc_num_threads, -1,
-             "Number of RPC worker threads for the TS consensus service. If -1, it is auto "
-             "configured.");
-TAG_FLAG(ts_consensus_svc_num_threads, advanced);
-
-DEFINE_UNKNOWN_int32(ts_remote_bootstrap_svc_num_threads, 10,
-             "Number of RPC worker threads for the TS remote bootstrap service");
-TAG_FLAG(ts_remote_bootstrap_svc_num_threads, advanced);
-
+DEPRECATE_FLAG(int32, tablet_server_svc_num_threads, "02_2024");
+DEPRECATE_FLAG(int32, ts_admin_svc_num_threads, "02_2024");
+DEPRECATE_FLAG(int32, ts_consensus_svc_num_threads, "02_2024");
+DEPRECATE_FLAG(int32, ts_remote_bootstrap_svc_num_threads, "02_2024");
 DEFINE_UNKNOWN_int32(tablet_server_svc_queue_length,
     yb::tserver::TabletServer::kDefaultSvcQueueLength,
     "RPC queue length for the TS service.");
@@ -194,9 +184,7 @@ DEFINE_test_flag(int32, echo_svc_queue_length, 50, "RPC queue length for the Tes
 
 DEFINE_test_flag(bool, select_all_status_tablets, false, "");
 
-DEFINE_UNKNOWN_int32(ts_backup_svc_num_threads, 4,
-             "Number of RPC worker threads for the TS backup service");
-TAG_FLAG(ts_backup_svc_num_threads, advanced);
+DEPRECATE_FLAG(int32, ts_backup_svc_num_threads, "02_2024");
 
 DEFINE_UNKNOWN_int32(ts_backup_svc_queue_length, 50,
              "RPC queue length for the TS backup service");
@@ -206,7 +194,6 @@ DEFINE_UNKNOWN_int32(xcluster_svc_queue_length, 5000,
              "RPC queue length for the xCluster service");
 TAG_FLAG(xcluster_svc_queue_length, advanced);
 
-DECLARE_string(cert_node_filename);
 DECLARE_bool(ysql_enable_table_mutation_counter);
 
 DEFINE_NON_RUNTIME_bool(allow_encryption_at_rest, true,
@@ -323,7 +310,8 @@ TabletServer::TabletServer(const TabletServerOptions& opts)
       tablet_manager_(new TSTabletManager(fs_manager_.get(), this, metric_registry())),
       path_handlers_(new TabletServerPathHandlers(this)),
       maintenance_manager_(new MaintenanceManager(MaintenanceManager::DEFAULT_OPTIONS)),
-      master_config_index_(0) {
+      master_config_index_(0),
+      xcluster_context_(new TserverXClusterContext()) {
   SetConnectionContextFactory(rpc::CreateConnectionContextFactory<rpc::YBInboundConnectionContext>(
       FLAGS_inbound_rpc_memory_limit, mem_tracker()));
   if (FLAGS_ysql_enable_db_catalog_version_mode) {
@@ -462,7 +450,8 @@ Status TabletServer::Init() {
     encryption::UniverseKeyRegistryPB universe_key_registry;
     while (true) {
       auto res = client::UniverseKeyClient::GetFullUniverseKeyRegistry(
-          options_.HostsString(), JoinStrings(master_addresses, ","), *fs_manager());
+          options_.HostsString(), JoinStrings(master_addresses, ","),
+          fs_manager()->GetDefaultRootDir());
       if (res.ok()) {
         universe_key_registry = *res;
         break;
@@ -565,29 +554,11 @@ Status TabletServer::WaitInited() {
 void TabletServer::AutoInitServiceFlags() {
   const int32 num_cores = base::NumCPUs();
 
-  if (FLAGS_tablet_server_svc_num_threads == -1) {
-    // Auto select number of threads for the TS service based on number of cores.
-    // But bound it between 64 & 512.
-    const int32 num_threads = std::max(64, std::min(512, num_cores * 32));
-    CHECK_OK(SET_FLAG_DEFAULT_AND_CURRENT(tablet_server_svc_num_threads, num_threads));
-    LOG(INFO) << "Auto setting FLAGS_tablet_server_svc_num_threads to "
-              << FLAGS_tablet_server_svc_num_threads;
-  }
-
   if (FLAGS_num_concurrent_backfills_allowed == -1) {
     const int32 num_threads = std::max(1, std::min(8, num_cores / 2));
     CHECK_OK(SET_FLAG_DEFAULT_AND_CURRENT(num_concurrent_backfills_allowed, num_threads));
     LOG(INFO) << "Auto setting FLAGS_num_concurrent_backfills_allowed to "
               << FLAGS_num_concurrent_backfills_allowed;
-  }
-
-  if (FLAGS_ts_consensus_svc_num_threads == -1) {
-    // Auto select number of threads for the TS service based on number of cores.
-    // But bound it between 64 & 512.
-    const int32 num_threads = std::max(64, std::min(512, num_cores * 32));
-    CHECK_OK(SET_FLAG_DEFAULT_AND_CURRENT(ts_consensus_svc_num_threads, num_threads));
-    LOG(INFO) << "Auto setting FLAGS_ts_consensus_svc_num_threads to "
-              << FLAGS_ts_consensus_svc_num_threads;
   }
 }
 
@@ -633,10 +604,8 @@ Status TabletServer::RegisterServices() {
       FLAGS_ts_remote_bootstrap_svc_queue_length, std::move(remote_bootstrap_service)));
   auto pg_client_service = std::make_shared<PgClientServiceImpl>(
       *this, tablet_manager_->client_future(), clock(),
-      std::bind(&TabletServer::TransactionPool, this), mem_tracker(), metric_entity(),
-      messenger(), permanent_uuid(), &options(),
-      XClusterContext(xcluster_safe_time_map_, xcluster_read_only_mode_),
-      &pg_node_level_mutation_counter_);
+      std::bind(&TabletServer::TransactionPool, this), mem_tracker(), metric_entity(), messenger(),
+      permanent_uuid(), &options(), xcluster_context_.get(), &pg_node_level_mutation_counter_);
   pg_client_service_ = pg_client_service;
   LOG(INFO) << "yb::tserver::PgClientServiceImpl created at " << pg_client_service.get();
   RETURN_NOT_OK(RegisterService(FLAGS_pg_client_svc_queue_length, std::move(pg_client_service)));
@@ -1056,6 +1025,19 @@ void TabletServer::SetYsqlDBCatalogVersions(
   }
 }
 
+void TabletServer::WriteServerMetaCacheAsJson(JsonWriter* writer) {
+  writer->StartObject();
+  DbServerBase::WriteMainMetaCacheAsJson(writer);
+  if (auto xcluster_consumer = GetXClusterConsumer()) {
+    auto clients = xcluster_consumer->GetYbClientsList();
+    for (auto client : clients) {
+      writer->String(client->client_name());
+      client->AddMetaCacheInfo(writer);
+    }
+  }
+  writer->EndObject();
+}
+
 void TabletServer::UpdateTransactionTablesVersion(uint64_t new_version) {
   const auto transaction_manager = transaction_manager_.load(std::memory_order_acquire);
   if (transaction_manager) {
@@ -1090,16 +1072,8 @@ void TabletServer::SetPublisher(rpc::Publisher service) {
   publish_service_ptr_.reset(new rpc::Publisher(std::move(service)));
 }
 
-const XClusterSafeTimeMap& TabletServer::GetXClusterSafeTimeMap() const {
-  return xcluster_safe_time_map_;
-}
-
 PgMutationCounter& TabletServer::GetPgNodeLevelMutationCounter() {
   return pg_node_level_mutation_counter_;
-}
-
-void TabletServer::UpdateXClusterSafeTime(const XClusterNamespaceToSafeTimePBMap& safe_time_map) {
-  xcluster_safe_time_map_.Update(safe_time_map);
 }
 
 Result<cdc::XClusterRole> TabletServer::TEST_GetXClusterRole() const {
@@ -1173,8 +1147,8 @@ void TabletServer::InvalidatePgTableCache() {
 Status TabletServer::SetupMessengerBuilder(rpc::MessengerBuilder* builder) {
   RETURN_NOT_OK(DbServerBase::SetupMessengerBuilder(builder));
 
-  secure_context_ = VERIFY_RESULT(
-      server::SetupInternalSecureContext(options_.HostsString(), *fs_manager_, builder));
+  secure_context_ = VERIFY_RESULT(rpc::SetupInternalSecureContext(
+      options_.HostsString(), fs_manager_->GetDefaultRootDir(), builder));
 
   return Status::OK();
 }
@@ -1217,7 +1191,7 @@ Status TabletServer::CreateXClusterConsumer() {
     auto tablet_peer = tablet_manager_->LookupTablet(tablet_id);
     SCHECK(tablet_peer, NotFound, "Could not find tablet $0", tablet_id);
     return std::make_pair(
-        tablet_peer->tablet_metadata()->namespace_id(),
+        VERIFY_RESULT(tablet_peer->GetNamespaceId()),
         tablet_peer->tablet_metadata()->namespace_name());
   };
 
@@ -1229,6 +1203,8 @@ Status TabletServer::CreateXClusterConsumer() {
 
 Status TabletServer::XClusterHandleMasterHeartbeatResponse(
     const master::TSHeartbeatResponsePB& resp) {
+  xcluster_context_->UpdateSafeTime(resp.xcluster_namespace_to_safe_time());
+
   auto* xcluster_consumer = GetXClusterConsumer();
 
   // Only create a xcluster consumer if consumer_registry is not null.
@@ -1241,7 +1217,7 @@ Status TabletServer::XClusterHandleMasterHeartbeatResponse(
       xcluster_consumer = GetXClusterConsumer();
     }
 
-    SetXClusterDDLOnlyMode(consumer_registry->role() != cdc::XClusterRole::ACTIVE);
+    xcluster_context_->SetDDLOnlyMode(consumer_registry->role() != cdc::XClusterRole::ACTIVE);
   }
 
   if (xcluster_consumer) {
@@ -1270,6 +1246,15 @@ Status TabletServer::XClusterHandleMasterHeartbeatResponse(
   return Status::OK();
 }
 
+Status TabletServer::ClearUniverseUuid() {
+  auto instance_universe_uuid_str = VERIFY_RESULT(
+      fs_manager_->GetUniverseUuidFromTserverInstanceMetadata());
+  auto instance_universe_uuid = VERIFY_RESULT(UniverseUuid::FromString(instance_universe_uuid_str));
+  SCHECK_EQ(false, instance_universe_uuid.IsNil(), IllegalState,
+      "universe_uuid is not set in instance metadata");
+  return fs_manager_->ClearUniverseUuidOnTserverInstanceMetadata();
+}
+
 Status TabletServer::ValidateAndMaybeSetUniverseUuid(const UniverseUuid& universe_uuid) {
   auto instance_universe_uuid_str = VERIFY_RESULT(
       fs_manager_->GetUniverseUuidFromTserverInstanceMetadata());
@@ -1281,6 +1266,7 @@ Status TabletServer::ValidateAndMaybeSetUniverseUuid(const UniverseUuid& univers
                "uuid is $1", universe_uuid.ToString(), instance_universe_uuid.ToString()));
     return Status::OK();
   }
+
   return fs_manager_->SetUniverseUuidOnTserverInstanceMetadata(universe_uuid);
 }
 
@@ -1326,10 +1312,8 @@ Status TabletServer::ReloadKeysAndCertificates() {
     return Status::OK();
   }
 
-  RETURN_NOT_OK(server::ReloadSecureContextKeysAndCertificates(
-      secure_context_.get(),
-      fs_manager_->GetDefaultRootDir(),
-      server::SecureContextType::kInternal,
+  RETURN_NOT_OK(rpc::ReloadSecureContextKeysAndCertificates(
+      secure_context_.get(), fs_manager_->GetDefaultRootDir(), rpc::SecureContextType::kInternal,
       options_.HostsString()));
 
   std::lock_guard l(xcluster_consumer_mutex_);
@@ -1363,24 +1347,45 @@ Status TabletServer::SetCDCServiceEnabled() {
   return Status::OK();
 }
 
-void TabletServer::SetXClusterDDLOnlyMode(bool is_xcluster_read_only_mode) {
-  xcluster_read_only_mode_.store(is_xcluster_read_only_mode, std::memory_order_release);
+const TserverXClusterContextIf& TabletServer::GetXClusterContext() const {
+  return *xcluster_context_;
 }
 
-void TabletServer::SetCQLServer(yb::server::RpcAndWebServerBase* server) {
+void TabletServer::SetCQLServer(yb::server::RpcAndWebServerBase* server,
+      server::YCQLStatementStatsProvider* stmt_provider) {
   DCHECK_EQ(cql_server_.load(), nullptr);
+  DCHECK_EQ(cql_stmt_provider_.load(), nullptr);
+
   cql_server_.store(server);
+  cql_stmt_provider_.store(stmt_provider);
 }
 
-rpc::Messenger* TabletServer::GetMessenger(ServerType server_type) const {
-  switch (server_type) {
-    case ServerType::TServer:
+Status TabletServer::YCQLStatementStats(const tserver::PgYCQLStatementStatsRequestPB& req,
+      tserver::PgYCQLStatementStatsResponsePB* resp) const {
+    auto* cql_stmt_provider = cql_stmt_provider_.load();
+    SCHECK_NOTNULL(cql_stmt_provider);
+    RETURN_NOT_OK(cql_stmt_provider->YCQLStatementStats(req, resp));
+    return Status::OK();
+}
+
+rpc::Messenger* TabletServer::GetMessenger(ash::Component component) const {
+  switch (component) {
+    case ash::Component::kYSQL:
+    case ash::Component::kMaster:
+      return nullptr;
+    case ash::Component::kTServer:
       return messenger();
-    case ServerType::CQLServer:
+    case ash::Component::kYCQL:
       auto cql_server = cql_server_.load();
       return (cql_server ? cql_server->messenger() : nullptr);
   }
-  FATAL_INVALID_ENUM_VALUE(ServerType, server_type);
+  FATAL_INVALID_ENUM_VALUE(ash::Component, component);
 }
 
+void TabletServer::ClearAllMetaCachesOnServer() {
+  if (auto xcluster_consumer = GetXClusterConsumer()) {
+    xcluster_consumer->ClearAllClientMetaCaches();
+  }
+  client()->ClearAllMetaCachesOnServer();
+}
 }  // namespace yb::tserver

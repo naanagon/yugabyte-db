@@ -33,6 +33,7 @@ import {
 } from '../../constants';
 import { FieldGroup } from '../components/FieldGroup';
 import {
+  UseProviderValidationEnabled,
   addItem,
   constructAccessKeysEditPayload,
   deleteItem,
@@ -40,6 +41,7 @@ import {
   generateLowerCaseAlphanumericId,
   getIsFieldDisabled,
   getIsFormDisabled,
+  handleFormSubmitServerError,
   readFileAsText
 } from '../utils';
 import { FormContainer } from '../components/FormContainer';
@@ -77,10 +79,11 @@ import {
   hasNecessaryPerm,
   RbacValidator
 } from '../../../../../redesign/features/rbac/common/RbacApiPermValidator';
-import { constructImageBundlePayload } from '../../components/linuxVersionCatalog/LinuxVersionUtils';
+import { ConfigureSSHDetailsMsg, IsOsPatchingEnabled, constructImageBundlePayload } from '../../components/linuxVersionCatalog/LinuxVersionUtils';
 import { ApiPermissionMap } from '../../../../../redesign/features/rbac/ApiAndUserPermMapping';
 import { LinuxVersionCatalog } from '../../components/linuxVersionCatalog/LinuxVersionCatalog';
 import { CloudType } from '../../../../../redesign/helpers/dtos';
+import { GCPCreateFormErrFields } from './constants';
 
 interface GCPProviderEditFormProps {
   editProvider: EditProvider;
@@ -189,6 +192,10 @@ export const GCPProviderEditForm = ({
   );
   const hostInfoQuery = useQuery(hostInfoQueryKey.ALL, () => api.fetchHostInfo());
 
+  const isOsPatchingEnabled = IsOsPatchingEnabled();
+  const sshConfigureMsg = ConfigureSSHDetailsMsg();
+  const { isLoading: isProviderValidationLoading, isValidationEnabled } = UseProviderValidationEnabled(CloudType.gcp);
+
   if (hostInfoQuery.isError) {
     return (
       <YBErrorIndicator
@@ -207,7 +214,8 @@ export const GCPProviderEditForm = ({
     hostInfoQuery.isLoading ||
     hostInfoQuery.isIdle ||
     customerRuntimeConfigQuery.isLoading ||
-    customerRuntimeConfigQuery.isIdle
+    customerRuntimeConfigQuery.isIdle ||
+    isProviderValidationLoading
   ) {
     return <YBLoading />;
   }
@@ -224,7 +232,14 @@ export const GCPProviderEditForm = ({
     try {
       const providerPayload = await constructProviderPayload(formValues, providerConfig);
       try {
-        await editProvider(providerPayload);
+        await editProvider(providerPayload,
+          {
+            shouldValidate: isValidationEnabled,
+            mutateOptions: {
+              onError: err => handleFormSubmitServerError((err as any)?.response?.data, formMethods, GCPCreateFormErrFields)
+            }
+          }
+        );
       } catch (_) {
         // Handled with `mutateOptions.onError`
       }
@@ -524,6 +539,7 @@ export const GCPProviderEditForm = ({
                   isProviderInUse
                 )}
                 isError={!!formMethods.formState.errors.regions}
+                errors={formMethods.formState.errors.regions as any}
                 linkedUniverses={linkedUniverses}
                 isEditInUseProviderEnabled={isEditInUseProviderEnabled}
               />
@@ -540,6 +556,7 @@ export const GCPProviderEditForm = ({
               providerStatus={providerConfig.usabilityState}
             />
             <FieldGroup heading="SSH Key Pairs">
+              {sshConfigureMsg}
               <FormField>
                 <FieldLabel>SSH User</FieldLabel>
                 <YBInputField
@@ -550,7 +567,7 @@ export const GCPProviderEditForm = ({
                     'sshUser',
                     isFormDisabled,
                     isProviderInUse
-                  )}
+                  ) || isOsPatchingEnabled}
                   fullWidth
                 />
               </FormField>
@@ -566,7 +583,7 @@ export const GCPProviderEditForm = ({
                     'sshPort',
                     isFormDisabled,
                     isProviderInUse
-                  )}
+                  ) || isOsPatchingEnabled}
                   fullWidth
                 />
               </FormField>
@@ -817,7 +834,7 @@ const constructProviderPayload = async (
   try {
     sshPrivateKeyContent =
       formValues.sshKeypairManagement === KeyPairManagement.SELF_MANAGED &&
-      formValues.sshPrivateKeyContent
+        formValues.sshPrivateKeyContent
         ? (await readFileAsText(formValues.sshPrivateKeyContent)) ?? ''
         : '';
   } catch (error) {
@@ -829,32 +846,32 @@ const constructProviderPayload = async (
   const vpcConfig =
     formValues.vpcSetupType === VPCSetupType.HOST_INSTANCE
       ? {
-          useHostVPC: true
-        }
+        useHostVPC: true
+      }
       : formValues.vpcSetupType === VPCSetupType.EXISTING
-      ? {
+        ? {
           useHostVPC: true, // Must be sent as true for backwards compatability.
           destVpcId: formValues.destVpcId
         }
-      : formValues.vpcSetupType === VPCSetupType.NEW
-      ? {
-          useHostVPC: false,
-          destVpcId: formValues.destVpcId
-        }
-      : assertUnreachableCase(formValues.vpcSetupType);
+        : formValues.vpcSetupType === VPCSetupType.NEW
+          ? {
+            useHostVPC: false,
+            destVpcId: formValues.destVpcId
+          }
+          : assertUnreachableCase(formValues.vpcSetupType);
 
   const gcpCredentials =
     formValues.providerCredentialType === ProviderCredentialType.HOST_INSTANCE_SERVICE_ACCOUNT
       ? {
-          useHostCredentials: true
-        }
+        useHostCredentials: true
+      }
       : formValues.providerCredentialType === ProviderCredentialType.SPECIFIED_SERVICE_ACCOUNT
-      ? {
+        ? {
           gceApplicationCredentials: googleServiceAccount,
           gceProject: googleServiceAccount?.project_id ?? '',
           useHostCredentials: false
         }
-      : assertUnreachableCase(formValues.providerCredentialType);
+        : assertUnreachableCase(formValues.providerCredentialType);
 
   const allAccessKeysPayload = constructAccessKeysEditPayload(
     formValues.editSSHKeypair,
@@ -884,20 +901,20 @@ const constructProviderPayload = async (
           ...vpcConfig,
           ...(formValues.editCloudCredentials
             ? {
-                ...gcpCredentials,
-                ...(formValues.sharedVPCProject && {
-                  sharedVPCProject: formValues.sharedVPCProject
-                })
-              }
+              ...gcpCredentials,
+              ...(formValues.sharedVPCProject && {
+                sharedVPCProject: formValues.sharedVPCProject
+              })
+            }
             : {
-                useHostCredentials: cloudInfo.gcp.useHostCredentials,
-                gceProject: cloudInfo.gcp.gceProject,
-                gceApplicationCredentials: cloudInfo.gcp.gceApplicationCredentials,
-                gceApplicationCredentialsPath: cloudInfo.gcp.gceApplicationCredentialsPath,
-                ...(cloudInfo.gcp.sharedVPCProject && {
-                  sharedVPCProject: cloudInfo.gcp.sharedVPCProject
-                })
-              }),
+              useHostCredentials: cloudInfo.gcp.useHostCredentials,
+              gceProject: cloudInfo.gcp.gceProject,
+              gceApplicationCredentials: cloudInfo.gcp.gceApplicationCredentials,
+              gceApplicationCredentialsPath: cloudInfo.gcp.gceApplicationCredentialsPath,
+              ...(cloudInfo.gcp.sharedVPCProject && {
+                sharedVPCProject: cloudInfo.gcp.sharedVPCProject
+              })
+            }),
           ...(formValues.ybFirewallTags && { ybFirewallTags: formValues.ybFirewallTags })
         }
       },
@@ -931,17 +948,17 @@ const constructProviderPayload = async (
           },
           zones: existingRegion
             ? existingRegion.zones.map((zone) => ({
-                active: zone.active,
-                code: zone.code,
-                name: zone.name,
-                subnet: regionFormValues.sharedSubnet ?? '',
-                uuid: zone.uuid
-              }))
+              active: zone.active,
+              code: zone.code,
+              name: zone.name,
+              subnet: regionFormValues.sharedSubnet ?? '',
+              uuid: zone.uuid
+            }))
             : regionFormValues.zones.map<GCPAvailabilityZoneMutation>((zone) => ({
-                code: zone.code,
-                name: zone.code,
-                subnet: regionFormValues.sharedSubnet ?? ''
-              }))
+              code: zone.code,
+              name: zone.code,
+              subnet: regionFormValues.sharedSubnet ?? ''
+            }))
         };
       }),
       ...getDeletedRegions(providerConfig.regions, formValues.regions)

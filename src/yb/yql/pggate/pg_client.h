@@ -233,9 +233,6 @@ class PgClient {
   Result<tserver::PgGetReplicationSlotResponsePB> GetReplicationSlot(
       const ReplicationSlotName& slot_name);
 
-  Result<tserver::PgGetReplicationSlotStatusResponsePB> GetReplicationSlotStatus(
-      const ReplicationSlotName& slot_name);
-
   Result<tserver::PgActiveSessionHistoryResponsePB> ActiveSessionHistory();
 
   Result<cdc::InitVirtualWALForCDCResponsePB> InitVirtualWALForCDC(
@@ -245,6 +242,9 @@ class PgClient {
 
   Result<cdc::GetConsistentChangesResponsePB> GetConsistentChangesForCDC(
       const std::string& stream_id);
+
+  Result<cdc::UpdateAndPersistLSNResponsePB> UpdateAndPersistLSN(
+      const std::string& stream_id, YBCPgXLogRecPtr restart_lsn, YBCPgXLogRecPtr confirmed_flush);
 
   using ActiveTransactionCallback = LWFunction<Status(
       const tserver::PgGetActiveTransactionListResponsePB_EntryPB&, bool is_last)>;
@@ -259,6 +259,8 @@ class PgClient {
   BOOST_PP_SEQ_FOR_EACH(YB_PG_CLIENT_SIMPLE_METHOD_DECLARE, ~, YB_PG_CLIENT_SIMPLE_METHODS);
 
   Status CancelTransaction(const unsigned char* transaction_id);
+
+  Result<tserver::PgYCQLStatementStatsResponsePB> YCQLStatementStats();
 
  private:
   class Impl;

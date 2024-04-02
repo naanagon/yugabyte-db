@@ -23,6 +23,7 @@
 namespace yb {
 
 class HybridTime;
+class JsonWriter;
 
 namespace rpc {
 class RpcContext;
@@ -32,8 +33,8 @@ namespace master {
 
 class GetXClusterSafeTimeRequestPB;
 class GetXClusterSafeTimeResponsePB;
-class SysXClusterConfigEntryPB;
 struct LeaderEpoch;
+struct XClusterStatus;
 
 class XClusterManagerIf {
  public:
@@ -45,8 +46,13 @@ class XClusterManagerIf {
   virtual Result<HybridTime> GetXClusterSafeTimeForNamespace(
       const LeaderEpoch& epoch, const NamespaceId& namespace_id,
       const XClusterSafeTimeFilter& filter) = 0;
+  virtual Status MarkIndexBackfillCompleted(
+      const std::unordered_set<TableId>& index_ids, const LeaderEpoch& epoch) = 0;
 
-  virtual Status GetXClusterConfigEntryPB(SysXClusterConfigEntryPB* config) const = 0;
+  virtual Result<XClusterStatus> GetXClusterStatus() const = 0;
+  virtual Status PopulateXClusterStatusJson(JsonWriter& jw) const = 0;
+
+  virtual void RunBgTasks(const LeaderEpoch& epoch) = 0;
 
  protected:
   virtual ~XClusterManagerIf() = default;

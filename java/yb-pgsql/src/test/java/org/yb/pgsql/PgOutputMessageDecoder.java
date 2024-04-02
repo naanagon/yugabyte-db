@@ -20,6 +20,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import javax.annotation.Nullable;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,7 +35,7 @@ import org.slf4j.LoggerFactory;
 public class PgOutputMessageDecoder {
   private static final Logger LOG = LoggerFactory.getLogger(PgOutputMessageDecoder.class);
 
-  public enum PgOutputMessageType { RELATION, TYPE, BEGIN, COMMIT, INSERT };
+  public enum PgOutputMessageType { RELATION, TYPE, BEGIN, COMMIT, INSERT, UPDATE, DELETE };
 
   public interface PgOutputMessage {
     PgOutputMessageType messageType();
@@ -478,6 +480,99 @@ public class PgOutputMessageDecoder {
   }
 
   /*
+   * UPDATE message
+   */
+  protected static class PgOutputUpdateMessage implements PgOutputMessage {
+    final int oid;
+    @Nullable final PgOutputMessageTuple old_tuple;
+    final PgOutputMessageTuple new_tuple;
+
+    public PgOutputUpdateMessage(
+        int oid, @Nullable PgOutputMessageTuple old_tuple, PgOutputMessageTuple new_tuple) {
+      this.oid = oid;
+      this.old_tuple = old_tuple;
+      this.new_tuple = new_tuple;
+    }
+
+    public static PgOutputUpdateMessage CreateForComparison(
+        @Nullable PgOutputMessageTuple old_tuple, PgOutputMessageTuple new_tuple) {
+      return new PgOutputUpdateMessage(0, old_tuple, new_tuple);
+    }
+
+    @Override
+    public PgOutputMessageType messageType() {
+      return PgOutputMessageType.UPDATE;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other)
+        return true;
+
+      if (other == null || this.getClass() != other.getClass())
+        return false;
+
+      PgOutputUpdateMessage otherMessage = (PgOutputUpdateMessage) other;
+      return ((this.old_tuple == null) ? otherMessage.old_tuple == null
+                                       : this.old_tuple.equals(otherMessage.old_tuple))
+          && this.new_tuple.equals(otherMessage.new_tuple);
+    }
+
+    @Override
+    public String toString() {
+      String old_tuple_string = (this.old_tuple != null) ? old_tuple.toString() : "NULL";
+      // We only output the fields that matter for comparison so that it is easier to do a
+      // diff-check while debugging tests.
+      return String.format("UPDATE: (old_tuple = %s, new_tuple = %s)", old_tuple_string, new_tuple);
+    }
+  }
+
+  /*
+   * DELETE message
+   */
+  protected static class PgOutputDeleteMessage implements PgOutputMessage {
+    final int oid;
+    final boolean hasKey;
+    final PgOutputMessageTuple oldTuple;
+
+    public PgOutputDeleteMessage(int oid, boolean hasKey, PgOutputMessageTuple oldTuple) {
+      this.oid = oid;
+      this.hasKey = hasKey;
+      this.oldTuple = oldTuple;
+    }
+
+    public static PgOutputDeleteMessage CreateForComparison(
+        boolean hasKey, PgOutputMessageTuple oldTuple) {
+      return new PgOutputDeleteMessage(0, hasKey, oldTuple);
+    }
+
+    @Override
+    public PgOutputMessageType messageType() {
+      return PgOutputMessageType.DELETE;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other)
+        return true;
+
+      if (other == null || this.getClass() != other.getClass())
+        return false;
+
+      PgOutputDeleteMessage otherMessage = (PgOutputDeleteMessage) other;
+      return this.oldTuple.equals(otherMessage.oldTuple);
+    }
+
+    @Override
+    public String toString() {
+      String oldTupleString = oldTuple.toString();
+      // We only output the fields that matter for comparison so that it is easier to do a
+      // diff-check while debugging tests.
+      return String.format("DELETE: (oldTuple = %s, hasKey = %b)", oldTupleString, hasKey);
+    }
+  }
+
+  /*
    * Decode the data passed as bytes into a PgOutputMessage.
    */
   public static PgOutputMessage DecodeBytes(ByteBuffer buf) throws Exception {
@@ -529,6 +624,30 @@ public class PgOutputMessageDecoder {
         PgOutputMessageTuple tuple = decodePgOutputMessageTuple(buffer);
         PgOutputInsertMessage insertMessage = new PgOutputInsertMessage(oid, tuple);
         return insertMessage;
+
+      case 'U': // UPDATE
+        oid = buffer.getInt();
+        char oldOrNew = (char)buffer.get();
+
+        // 'K' or 'O' represents old tuple while 'N' represents new tuple
+        PgOutputMessageTuple old_tuple = null;
+        if (oldOrNew == 'K' || oldOrNew == 'O') {
+          old_tuple = decodePgOutputMessageTuple(buffer);
+          buffer.get(); // Always 'N'
+        }
+
+        PgOutputMessageTuple new_tuple = decodePgOutputMessageTuple(buffer);
+        PgOutputUpdateMessage updateMessage = new PgOutputUpdateMessage(oid, old_tuple, new_tuple);
+        return updateMessage;
+
+      case 'D': // DELETE
+        oid = buffer.getInt();
+        char tupleType = (char) buffer.get();
+        old_tuple = decodePgOutputMessageTuple(buffer);
+        // 'K' represents key while 'O' represents complete old tuple.
+        PgOutputDeleteMessage deleteMessage =
+            new PgOutputDeleteMessage(oid, tupleType == 'K', old_tuple);
+        return deleteMessage;
 
       case 'Y': // TYPE
         oid = buffer.getInt();

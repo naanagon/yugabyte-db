@@ -109,6 +109,7 @@ DECLARE_uint32(cdcsdk_retention_barrier_no_revision_interval_secs);
 DECLARE_bool(TEST_cdcsdk_skip_processing_dynamic_table_addition);
 DECLARE_int32(TEST_user_ddl_operation_timeout_sec);
 DECLARE_uint32(cdcsdk_max_consistent_records);
+DECLARE_bool(ysql_TEST_enable_replication_slot_consumption);
 
 namespace yb {
 
@@ -124,6 +125,10 @@ namespace cdc {
 
 YB_DEFINE_ENUM(IntentCountCompareOption, (GreaterThanOrEqualTo)(GreaterThan)(EqualTo));
 YB_DEFINE_ENUM(OpIdExpectedValue, (MaxOpId)(InvalidOpId)(ValidNonMaxOpId));
+
+static constexpr uint64_t kVWALSessionId1 = std::numeric_limits<uint64_t>::max() / 2;
+static constexpr uint64_t kVWALSessionId2 = std::numeric_limits<uint64_t>::max() / 2 + 1;
+static constexpr uint64_t kVWALSessionId3 = std::numeric_limits<uint64_t>::max() / 2 + 2;
 
 class CDCSDKYsqlTest : public CDCSDKTestBase {
  public:
@@ -147,6 +152,10 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
     OpId op_id = OpId::Max();
     int64_t cdc_sdk_latest_active_time = 0;
     HybridTime cdc_sdk_safe_time = HybridTime::kInvalid;
+    uint64_t confirmed_flush_lsn = 0;
+    uint64_t restart_lsn = 0;
+    uint32_t xmin = 0;
+    uint64_t record_id_commit_time = 0;
   };
 
   struct GetAllPendingChangesResponse {
@@ -199,17 +208,30 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
   // The range is exclusive of end i.e. [start, end)
   Status WriteRows(
       uint32_t start, uint32_t end, PostgresMiniCluster* cluster,
+      const vector<string>& optional_cols_name = {},
+      pgwrapper::PGConn* conn = nullptr);
+
+  Status WriteRowsWithConn(
+      uint32_t start, uint32_t end, PostgresMiniCluster* cluster,
+      pgwrapper::PGConn* conn = nullptr,
       const vector<string>& optional_cols_name = {});
 
   // The range is exclusive of end i.e. [start, end)
-  Status WriteRows(uint32_t start, uint32_t end, PostgresMiniCluster* cluster, uint32_t num_cols);
+  Status WriteRows(
+      uint32_t start, uint32_t end, PostgresMiniCluster* cluster, uint32_t num_cols,
+      std::string table_name = kTableName);
 
   void DropTable(PostgresMiniCluster* cluster, const char* table_name = kTableName);
 
   Status WriteRowsHelper(
       uint32_t start, uint32_t end, PostgresMiniCluster* cluster, bool flag, uint32_t num_cols = 2,
       const char* const table_name = kTableName, const vector<string>& optional_cols_name = {},
-      const bool trasaction_enabled = true);
+      const bool trasaction_enabled = true, pgwrapper::PGConn* conn = nullptr);
+
+  Status WriteRowsHelperWithConn(
+      uint32_t start, uint32_t end, PostgresMiniCluster* cluster, bool flag,
+      pgwrapper::PGConn* conn, uint32_t num_cols = 2, const char* const table_name = kTableName,
+      const vector<string>& optional_cols_name = {}, const bool trasaction_enabled = true);
 
   Status CreateTableWithoutPK(PostgresMiniCluster* cluster);
 
@@ -260,7 +282,9 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
       const std::string& type_suffix = "");
   Status WriteRangeArrayCompositeRows(uint32_t start, uint32_t end, PostgresMiniCluster* cluster);
 
-  Status UpdateRows(uint32_t key, uint32_t value, PostgresMiniCluster* cluster);
+  Status UpdateRows(
+      uint32_t key, uint32_t value, PostgresMiniCluster* cluster,
+      std::string table_name = kTableName);
 
   Status UpdatePrimaryKey(uint32_t key, uint32_t value, PostgresMiniCluster* cluster);
 
@@ -277,7 +301,8 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
       uint32_t start, uint32_t end, PostgresMiniCluster* cluster, bool flag, uint32_t key,
       const std::map<std::string, uint32_t>& col_val_map, uint32_t num_cols);
 
-  Status DeleteRows(uint32_t key, PostgresMiniCluster* cluster);
+  Status DeleteRows(
+      uint32_t key, PostgresMiniCluster* cluster, std::string table_name = kTableName);
 
   Status SplitTablet(const TabletId& tablet_id, PostgresMiniCluster* cluster);
 
@@ -384,6 +409,11 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
       const CDCSDKProtoRecordPB& record, const int32_t& key, const int32_t& value,
       const bool& validate_third_column = false, const int32_t& value2 = 0);
 
+  void AssertKeyValue(const CDCSDKProtoRecordPB& record1, const CDCSDKProtoRecordPB& record2);
+
+  void AssertCDCSDKProtoRecords(
+      const CDCSDKProtoRecordPB& record1, const CDCSDKProtoRecordPB& record2);
+
   void AssertBeforeImageKeyValue(
       const CDCSDKProtoRecordPB& record, const int32_t& key, const int32_t& value,
       const bool& validate_third_column = false, const int32_t& value2 = 0);
@@ -400,7 +430,8 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
   void CheckRecord(
       const CDCSDKProtoRecordPB& record, CDCSDKYsqlTest::ExpectedRecord expected_records,
       uint32_t* count, const bool& validate_old_tuple = false,
-      CDCSDKYsqlTest::ExpectedRecord expected_before_image_records = {});
+      CDCSDKYsqlTest::ExpectedRecord expected_before_image_records = {},
+      std::string table_name = kTableName, bool is_nothing_record = false);
 
   void CheckRecordWithThreeColumns(
       const CDCSDKProtoRecordPB& record,
@@ -446,13 +477,21 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
 
   Status InitVirtualWAL(
       const xrepl::StreamId& stream_id, const std::vector<TableId> table_ids,
-      const uint64_t session_id = 1);
+      const uint64_t session_id = kVWALSessionId1);
 
-  Status DestroyVirtualWAL(const uint64_t session_id = 1);
+  Status DestroyVirtualWAL(const uint64_t session_id = kVWALSessionId1);
 
-  Result<GetAllPendingChangesResponse> GetAllPendingChangesFromCdc(
+  Status UpdateAndPersistLSN(
+      const xrepl::StreamId& stream_id, const uint64_t confirmed_flush_lsn,
+      const uint64_t restart_lsn, const uint64_t session_id = kVWALSessionId1);
+
+  // This method will keep on consuming changes until it gets the txns fully i.e COMMIT record of
+  // the last txn. This indicates that even though we might have received the expecpted DML records,
+  // we might still continue calling GetConsistentChanges until we receive the COMMIT record.
+  Result<GetAllPendingChangesResponse> GetAllPendingTxnsFromVirtualWAL(
       const xrepl::StreamId& stream_id, std::vector<TableId> table_ids, int expected_dml_records,
-      bool init_virtual_wal, const uint64_t session_id = 1);
+      bool init_virtual_wal, const uint64_t session_id = kVWALSessionId1,
+      bool allow_sending_feedback = true);
 
   GetAllPendingChangesResponse GetAllPendingChangesFromCdc(
       const xrepl::StreamId& stream_id,
@@ -481,8 +520,7 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
       const uint32_t replication_factor, bool add_tables_without_primary_key = false);
 
   Result<GetConsistentChangesResponsePB> GetConsistentChangesFromCDC(
-      const xrepl::StreamId& stream_id, const std::vector<TableId> table_ids,
-      const uint64_t session_id = 1);
+      const xrepl::StreamId& stream_id, const uint64_t session_id = kVWALSessionId1);
 
   void TestIntentGarbageCollectionFlag(
       const uint32_t num_tservers,
@@ -520,6 +558,10 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
 
   Status CompactSystemTable();
 
+  Status FlushTable(const TableId& table_id);
+
+  Status WaitForPostApplyMetadataWritten(size_t expected_num_transactions);
+
   void GetTabletLeaderAndAnyFollowerIndex(
       const google::protobuf::RepeatedPtrField<master::TabletLocationsPB>& tablets,
       size_t* leader_index, size_t* follower_index);
@@ -538,6 +580,9 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
       const xrepl::StreamId& stream_id, const TabletId& tablet_id, client::YBClient* client);
 
   void ValidateColumnCounts(const GetChangesResponsePB& resp, uint32_t excepted_column_counts);
+
+  void ValidateColumnCounts(
+      const GetAllPendingChangesResponse& resp, uint32_t excepted_column_counts);
 
   void ValidateInsertCounts(const GetChangesResponsePB& resp, uint32_t excepted_insert_counts);
 
@@ -588,13 +633,24 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
   Result<CdcStateTableRow> ReadFromCdcStateTable(
       const xrepl::StreamId stream_id, const std::string& tablet_id);
 
+  void VerifyExplicitCheckpointingOnTablets(
+      const xrepl::StreamId& stream_id,
+      const std::unordered_map<TabletId, CdcStateTableRow>& initial_tablet_checkpoint,
+      const google::protobuf::RepeatedPtrField<master::TabletLocationsPB> tablets,
+      const std::unordered_set<TabletId>& expected_tablet_ids_with_progress);
+
+  void VerifyLastRecordAndProgressOnSlot(
+      const xrepl::StreamId& stream_id, const CDCSDKProtoRecordPB& last_record);
+
   void UpdateRecordCount(const CDCSDKProtoRecordPB& record, int* record_count);
 
   void CheckRecordsConsistency(const std::vector<CDCSDKProtoRecordPB>& records);
 
-  void CheckRecordCount(GetAllPendingChangesResponse resp, int expected_dml_records);
+  void CheckRecordCount(
+      GetAllPendingChangesResponse resp, int expected_dml_records, int expected_ddl_records = 0,
+      int expected_min_txn_id = 2 /* VWAL's min_txn_id */);
 
-  void CheckRecordsConsistencyWithWriteId(const std::vector<CDCSDKProtoRecordPB>& records);
+  void CheckRecordsConsistencyFromVWAL(const std::vector<CDCSDKProtoRecordPB>& records);
 
   void GetRecordsAndSplitCount(
       const xrepl::StreamId& stream_id, const TabletId& tablet_id, const TableId& table_id,
@@ -636,7 +692,11 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
       const CDCSDKCheckpointPB* cp = nullptr, const int64& safe_hybrid_time = -1,
       const int& wal_segment_index = 0, const double& timeout_secs = 5);
 
-  Status XreplValidateSplitCandidateTable(const TableId& table);
+  Status WaitForFlushTables(
+      const std::vector<TableId>& table_ids, bool add_indexes, int timeout_secs,
+      bool is_compaction);
+
+  Status XReplValidateSplitCandidateTable(const TableId& table);
 
   void LogRetentionBarrierAndRelatedDetails(const GetCheckpointResponsePB& checkpoint_result,
                                             const tablet::TabletPeerPtr& tablet_peer);
@@ -682,6 +742,12 @@ class CDCSDKYsqlTest : public CDCSDKTestBase {
       xrepl::StreamId stream_id, YBTableName table,
       google::protobuf::RepeatedPtrField<master::TabletLocationsPB> tablets,
       CDCSDKCheckpointPB checkpoint, GetChangesResponsePB* change_resp);
+
+  void TestTableIdAndPkInCDCRecords(bool colocated_db);
+
+  void VerifyTableIdAndPkInCDCRecords(
+      GetChangesResponsePB* resp, std::unordered_set<std::string>* record_primary_key,
+      std::unordered_set<std::string>* record_table_id);
 };
 
 }  // namespace cdc

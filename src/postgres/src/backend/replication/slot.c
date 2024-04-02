@@ -363,6 +363,9 @@ retry:
 	if (IsYugaByteEnabled())
 	{
 		YBCReplicationSlotDescriptor *yb_replication_slot;
+		int							 replica_identity_idx = 0;
+		HTAB						 *replica_identities;
+		HASHCTL						 ctl;
 
 		YBCGetReplicationSlot(name, &yb_replication_slot);
 
@@ -379,16 +382,55 @@ retry:
 						 LWTRANCHE_REPLICATION_SLOT_IO_IN_PROGRESS);
 		ConditionVariableInit(&slot->active_cv);
 
+		slot->data.confirmed_flush = yb_replication_slot->confirmed_flush;
+		slot->data.xmin = yb_replication_slot->xmin;
 		/*
-		 * Dummy values to always stream from the start.
-		 * TODO(#20726): This has to be updated to support restarts.
+		 * Set catalog_xmin as xmin to make the PG Debezium connector work.
+		 * It is not used in our implementation.
 		 */
-		slot->data.catalog_xmin = 0;
-		slot->data.confirmed_flush = 0;
-		slot->data.xmin = 0;
-		slot->data.restart_lsn = 0;
+		slot->data.catalog_xmin = yb_replication_slot->xmin;
+		slot->data.restart_lsn = yb_replication_slot->restart_lsn;
+
+		slot->data.yb_initial_record_commit_time_ht =
+			yb_replication_slot->record_id_commit_time_ht;
 
 		MyReplicationSlot = slot;
+
+		/* Setup the per-table replica identity table. */
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(Oid);
+		/*
+		 * We just need a char (1 byte) but the HTAB implementation requires
+		 * entrysize >= keysize. So we just end up storing both the table_oid
+		 * and the replica identity.
+		 */
+		ctl.entrysize = sizeof(YBCPgReplicaIdentityDescriptor);
+		ctl.hcxt = GetCurrentMemoryContext();
+
+		/*
+		 * TODO(#21028): This HTAB must be refreshed in case of dynamic table
+		 * additions so that it also includes the replica identity of the newly
+		 * added columns. It is not necessary to handle drop of a table though.
+		 */
+		replica_identities = hash_create("yb_repl_slot_replica_identities",
+										 32, /* start small and extend */
+										 &ctl, HASH_ELEM | HASH_BLOBS);
+		for (replica_identity_idx = 0;
+			 replica_identity_idx <
+			 yb_replication_slot->replica_identities_count;
+			 replica_identity_idx++)
+		{
+			YBCPgReplicaIdentityDescriptor *desc =
+				&yb_replication_slot->replica_identities[replica_identity_idx];
+
+			YBCPgReplicaIdentityDescriptor *value = hash_search(
+				replica_identities, &desc->table_oid, HASH_ENTER, NULL);
+			value->table_oid = desc->table_oid;
+			value->identity_type = desc->identity_type;
+		}
+		slot->data.yb_replica_identities = replica_identities;
+
+		pfree(yb_replication_slot);
 		return;
 	}
 
@@ -521,6 +563,9 @@ ReplicationSlotRelease(void)
 		ConditionVariableBroadcast(&slot->active_cv);
 	}
 
+	if (IsYugaByteEnabled() && MyReplicationSlot->data.yb_replica_identities)
+		hash_destroy(MyReplicationSlot->data.yb_replica_identities);
+
 	MyReplicationSlot = NULL;
 
 	/* might not have been set when we've been a plain slot */
@@ -590,10 +635,10 @@ ReplicationSlotDrop(const char *name, bool nowait)
 	 */
 	if (IsYugaByteEnabled())
 	{
-		bool		stream_active;
+		YBCReplicationSlotDescriptor *yb_replication_slot;
+		YBCGetReplicationSlot(name, &yb_replication_slot);
 
-		YBCGetReplicationSlotStatus(name, &stream_active);
-		if (stream_active)
+		if (yb_replication_slot->active)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_IN_USE),
 					 errmsg("replication slot \"%s\" is active", name)));
