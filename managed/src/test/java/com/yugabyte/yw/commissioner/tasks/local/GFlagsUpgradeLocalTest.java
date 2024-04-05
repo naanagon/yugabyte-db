@@ -237,7 +237,7 @@ public class GFlagsUpgradeLocalTest extends LocalProviderUniverseTestBase {
         taskInfo.getSubTasks().stream()
             .filter(t -> t.getTaskState() == TaskInfo.State.Success)
             .filter(t -> t.getTaskType() == TaskType.SetNodeState)
-            .map(t -> t.getDetails().get("nodeName").asText())
+            .map(t -> t.getTaskParams().get("nodeName").asText())
             .findFirst()
             .get();
 

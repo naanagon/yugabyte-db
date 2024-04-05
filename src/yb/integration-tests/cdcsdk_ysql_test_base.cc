@@ -1533,8 +1533,7 @@ Result<string> CDCSDKYsqlTest::GetUniverseId(PostgresMiniCluster* cluster) {
   }
 
   Result<GetConsistentChangesResponsePB> CDCSDKYsqlTest::GetConsistentChangesFromCDC(
-      const xrepl::StreamId& stream_id, const std::vector<TableId> table_ids,
-      const uint64_t session_id) {
+      const xrepl::StreamId& stream_id, const uint64_t session_id) {
     GetConsistentChangesRequestPB change_req;
     GetConsistentChangesResponsePB final_resp;
     change_req.set_stream_id(stream_id.ToString());
@@ -1547,8 +1546,9 @@ Result<string> CDCSDKYsqlTest::GetUniverseId(PostgresMiniCluster* cluster) {
           auto status =
               cdc_proxy_->GetConsistentChanges(change_req, &change_resp, &get_changes_rpc);
 
-          if (!status.ok()) {
-            return false;
+          if (status.ok() && !change_resp.has_error()) {
+            final_resp = change_resp;
+            return true;
           }
 
           if (status.ok() && change_resp.has_error()) {
@@ -1558,12 +1558,47 @@ Result<string> CDCSDKYsqlTest::GetUniverseId(PostgresMiniCluster* cluster) {
             }
           }
 
-          final_resp = change_resp;
-          return true;
+          return false;
         },
         MonoDelta::FromSeconds(kRpcTimeout), "GetConsistentChanges failed due to RPC timeout"));
 
     return final_resp;
+  }
+
+  Status CDCSDKYsqlTest::UpdatePublicationTableList(
+      const xrepl::StreamId& stream_id, const std::vector<TableId> table_ids,
+      const uint64_t& session_id) {
+    UpdatePublicationTableListRequestPB req;
+    UpdatePublicationTableListResponsePB resp;
+
+    req.set_stream_id(stream_id.ToString());
+    for (const auto& table_id : table_ids) {
+      req.add_table_id(table_id);
+    }
+    req.set_session_id(session_id);
+
+    RETURN_NOT_OK(WaitFor(
+        [&]() -> Result<bool> {
+          RpcController rpc;
+          auto status = cdc_proxy_->UpdatePublicationTableList(req, &resp, &rpc);
+
+          if (status.ok() && !resp.has_error()) {
+            return true;
+          }
+
+          if (status.ok() && resp.has_error()) {
+            status = StatusFromPB(resp.error().status());
+            if (status.IsNotFound() || status.IsInvalidArgument()) {
+              RETURN_NOT_OK(status);
+            }
+          }
+
+          return false;
+        },
+        MonoDelta::FromSeconds(kRpcTimeout),
+        "UpdatePublicationTableList failed due to RPC timeout"));
+
+    return Status::OK();
   }
 
   Status CDCSDKYsqlTest::UpdateAndPersistLSN(
@@ -1584,7 +1619,14 @@ Result<string> CDCSDKYsqlTest::GetUniverseId(PostgresMiniCluster* cluster) {
           if (status.ok() && !update_resp.has_error()) {
             return true;
           }
-          LOG(WARNING) << StatusFromPB(update_resp.error().status()).ToString();
+
+          if (status.ok() && update_resp.has_error()) {
+            status = StatusFromPB(update_resp.error().status());
+            if (status.IsNotFound() || status.IsInvalidArgument()) {
+              RETURN_NOT_OK(status);
+            }
+          }
+
           return false;
         },
         MonoDelta::FromSeconds(kRpcTimeout), "UpdateRestartLSN failed due to RPC timeout"));
@@ -1909,7 +1951,7 @@ Result<string> CDCSDKYsqlTest::GetUniverseId(PostgresMiniCluster* cluster) {
     if (init_virtual_wal) {
       Status s = InitVirtualWAL(stream_id, table_ids, session_id);
       if (!s.ok()) {
-        LOG(INFO) << "Error while trying to initialize virtual WAL";
+        LOG(ERROR) << "Error while trying to initialize virtual WAL";
         RETURN_NOT_OK(s);
       }
     }
@@ -1923,13 +1965,21 @@ Result<string> CDCSDKYsqlTest::GetUniverseId(PostgresMiniCluster* cluster) {
     RETURN_NOT_OK(WaitFor(
         [&]() -> Result<bool> {
           GetConsistentChangesResponsePB change_resp;
-          auto get_changes_result = GetConsistentChangesFromCDC(stream_id, table_ids, session_id);
+          auto get_changes_result = GetConsistentChangesFromCDC(stream_id, session_id);
 
           if (get_changes_result.ok()) {
             change_resp = *get_changes_result;
           } else {
             LOG(ERROR) << "Encountered error while calling GetConsistentChanges on stream: "
                        << stream_id << ", status: " << get_changes_result.status();
+            RETURN_NOT_OK(get_changes_result);
+          }
+
+          if (change_resp.has_needs_publication_table_list_refresh() &&
+          change_resp.needs_publication_table_list_refresh() &&
+          change_resp.has_publication_refresh_time() &&
+          change_resp.publication_refresh_time() > 0) {
+            resp.has_publication_refresh_indicator = true;
           }
 
           for (int i = 0; i < change_resp.cdc_sdk_proto_records_size(); i++) {
@@ -1961,7 +2011,8 @@ Result<string> CDCSDKYsqlTest::GetUniverseId(PostgresMiniCluster* cluster) {
               auto result =
                   UpdateAndPersistLSN(stream_id, confirmed_flush_lsn, restart_lsn, session_id);
               if (!result.ok()) {
-                LOG(WARNING) << "UpdateRestartLSN failed: " << result;
+                LOG(ERROR) << "UpdateRestartLSN failed: " << result;
+                RETURN_NOT_OK(result);
               }
             }
           }
@@ -3660,6 +3711,34 @@ Result<string> CDCSDKYsqlTest::GetUniverseId(PostgresMiniCluster* cluster) {
     return expected_row;
   }
 
+  Result<CDCSDKYsqlTest::CdcStateTableSlotRow> CDCSDKYsqlTest::ReadSlotEntryFromStateTable(
+      const xrepl::StreamId& stream_id) {
+    CdcStateTableSlotRow slot_row;
+    CDCStateTable cdc_state_table(test_client());
+    Status s;
+    auto table_range =
+        VERIFY_RESULT(cdc_state_table.GetTableRange(CDCStateTableEntrySelector().IncludeAll(), &s));
+
+    for (auto row_result : table_range) {
+      RETURN_NOT_OK(row_result);
+      auto& row = *row_result;
+      if (row.key.tablet_id == kCDCSDKSlotEntryTabletId && row.key.stream_id == stream_id) {
+        slot_row.confirmed_flush_lsn = *(row.confirmed_flush_lsn);
+        slot_row.restart_lsn = *(row.restart_lsn);
+        slot_row.xmin = *(row.xmin);
+        slot_row.record_id_commit_time = HybridTime(*(row.record_id_commit_time));
+        slot_row.last_pub_refresh_time = HybridTime(*(row.last_pub_refresh_time));
+        LOG(INFO) << "Read cdc_state table slot entry for slot with stream id: " << stream_id
+                  << " confirmed_flush_lsn: " << slot_row.confirmed_flush_lsn
+                  << " restart_lsn: " << slot_row.restart_lsn << " xmin: " << slot_row.xmin
+                  << " record_id_commit_time: " << slot_row.record_id_commit_time.ToUint64()
+                  << " last_pub_refresh_time: " << slot_row.last_pub_refresh_time.ToUint64();
+      }
+    }
+    RETURN_NOT_OK(s);
+    return slot_row;
+  }
+
   void CDCSDKYsqlTest::VerifyExplicitCheckpointingOnTablets(
       const xrepl::StreamId& stream_id,
       const std::unordered_map<TabletId, CdcStateTableRow>& initial_tablet_checkpoint,
@@ -3770,7 +3849,7 @@ Result<string> CDCSDKYsqlTest::GetUniverseId(PostgresMiniCluster* cluster) {
 
   void CDCSDKYsqlTest::CheckRecordsConsistencyFromVWAL(
       const std::vector<CDCSDKProtoRecordPB>& records) {
-    RowMessage_Op prev_op;
+    RowMessage_Op prev_op = RowMessage::UNKNOWN;
     uint64_t prev_commit_time = 0;
     std::string prev_docdb_txn_id = "";
     uint64_t prev_record_time = 0;

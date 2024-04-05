@@ -32,6 +32,7 @@ import com.yugabyte.yw.commissioner.Common.CloudType;
 import com.yugabyte.yw.common.ApiUtils;
 import com.yugabyte.yw.common.PlacementInfoUtil;
 import com.yugabyte.yw.common.ShellResponse;
+import com.yugabyte.yw.common.config.UniverseConfKeys;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.metrics.MetricQueryResponse;
@@ -284,7 +285,7 @@ public class EditUniverseTest extends UniverseModifyBaseTest {
         instanceActions.stream()
             .map(t -> t.getTaskType())
             .collect(Collectors.toCollection(ArrayList::new)));
-    JsonNode details = instanceActions.get(0).getDetails();
+    JsonNode details = instanceActions.get(0).getTaskParams();
     assertEquals(Json.toJson(newTags), details.get("tags"));
     assertEquals("q1,q3", details.get("deleteTags").asText());
 
@@ -414,7 +415,8 @@ public class EditUniverseTest extends UniverseModifyBaseTest {
   @Test
   public void testVolumeSizeValidationIncNum() {
     Universe universe = defaultUniverse;
-    RuntimeConfigEntry.upsert(universe, "yb.checks.node_disk_size.target_usage_percentage", "0");
+    RuntimeConfigEntry.upsert(
+        universe, UniverseConfKeys.targetNodeDiskUsagePercentage.getKey(), "0");
     UniverseDefinitionTaskParams taskParams = performFullMove(universe);
     taskParams.getPrimaryCluster().userIntent.deviceInfo.volumeSize--;
     taskParams.getPrimaryCluster().userIntent.deviceInfo.numVolumes++;

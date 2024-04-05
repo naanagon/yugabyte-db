@@ -899,12 +899,6 @@ YBInitPostgresBackend(
 	}
 }
 
-bool
-YbGetCurrentSessionId(uint64_t *session_id)
-{
-	return YBCGetCurrentPgSessionId(session_id);
-}
-
 void
 YBOnPostgresBackendShutdown()
 {
@@ -2041,6 +2035,12 @@ YbDdlModeOptional YbGetDdlMode(
 			is_version_increment = false;
 			is_breaking_change = false;
 			is_ddl = castNode(VacuumStmt, parsetree)->options & VACOPT_ANALYZE;
+			/*
+			 * Increment catalog version for ANALYZE statement to force catalog cache refresh
+			 * to pick up latest table statistics.
+			 */
+			if (is_ddl && ddl_transaction_state.original_node_tag == T_VacuumStmt)
+				is_version_increment = true;
 			break;
 
 		case T_RefreshMatViewStmt:
@@ -4595,4 +4595,15 @@ YbRelationSetNewRelfileNode(Relation rel, Oid newRelfileNodeId,
 
 	if (yb_test_fail_table_rewrite_after_creation)
 		elog(ERROR, "Injecting error.");
+}
+
+void
+YBCUpdateYbReadTimeAndInvalidateRelcache(uint64_t read_time_ht)
+{
+	char read_time[50];
+
+	sprintf(read_time, "%llu ht", (unsigned long long) read_time_ht);
+	elog(DEBUG1, "Setting yb_read_time to %s ", read_time);
+	assign_yb_read_time(read_time, NULL);
+	YbRelationCacheInvalidate();
 }

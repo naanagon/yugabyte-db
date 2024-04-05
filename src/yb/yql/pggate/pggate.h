@@ -745,7 +745,9 @@ class PgApiImpl {
 
   uint64_t GetReadTimeSerialNo();
 
-  void ForceReadTimeSerialNo(uint64_t read_time_serial_no);
+  uint64_t GetTxnSerialNo();
+
+  void RestoreSessionParallelData(const YBCPgSessionParallelData* session_data);
 
   //------------------------------------------------------------------------------------------------
   // Replication Slots Functions.
@@ -764,6 +766,9 @@ class PgApiImpl {
       const ReplicationSlotName& slot_name);
 
   Result<cdc::InitVirtualWALForCDCResponsePB> InitVirtualWALForCDC(
+      const std::string& stream_id, const std::vector<PgObjectId>& table_ids);
+
+  Result<cdc::UpdatePublicationTableListResponsePB> UpdatePublicationTableList(
       const std::string& stream_id, const std::vector<PgObjectId>& table_ids);
 
   Result<cdc::DestroyVirtualWALForCDCResponsePB> DestroyVirtualWALForCDC();

@@ -41,7 +41,9 @@ void YBCInterruptPgGate();
 
 //--------------------------------------------------------------------------------------------------
 // Environment and Session.
-bool YBCGetCurrentPgSessionId(uint64_t *session_id);
+bool YBCGetCurrentPgSessionParallelData(YBCPgSessionParallelData* session_data);
+
+void YBCRestorePgSessionParallelData(const YBCPgSessionParallelData* session_data);
 
 // Initialize a session to process statements that come from the same client connection.
 YBCStatus YBCPgInitSession(const char* database_name, YBCPgExecStatsState* session_stats);
@@ -799,10 +801,6 @@ YBCStatus YBCPrefetchRegisteredSysTables();
 
 YBCStatus YBCPgCheckIfPitrActive(bool* is_active);
 
-uint64_t YBCPgGetReadTimeSerialNo();
-
-void YBCPgForceReadTimeSerialNo(uint64_t read_time_serial_no);
-
 YBCStatus YBCIsObjectPartOfXRepl(YBCPgOid database_oid, YBCPgOid table_relfilenode_oid,
                                  bool* is_object_part_of_xrepl);
 
@@ -845,6 +843,9 @@ YBCStatus YBCPgNewDropReplicationSlot(const char *slot_name,
 YBCStatus YBCPgExecDropReplicationSlot(YBCPgStatement handle);
 
 YBCStatus YBCPgInitVirtualWalForCDC(
+    const char *stream_id, const YBCPgOid database_oid, YBCPgOid *relations, size_t num_relations);
+
+YBCStatus YBCPgUpdatePublicationTableList(
     const char *stream_id, const YBCPgOid database_oid, YBCPgOid *relations, size_t num_relations);
 
 YBCStatus YBCPgDestroyVirtualWalForCDC();
