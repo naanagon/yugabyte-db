@@ -115,7 +115,7 @@ public class XClusterLocalTest extends LocalProviderUniverseTestBase {
             10);
     assertTrue(ysqlResponse.isSuccess());
 
-    Thread.sleep(300);
+    Thread.sleep(2000);
     details = target.getUniverseDetails().nodeDetailsSet.iterator().next();
     ysqlResponse =
         localNodeUniverseManager.runYsqlCommand(
@@ -219,7 +219,7 @@ public class XClusterLocalTest extends LocalProviderUniverseTestBase {
             10);
 
     assertTrue(ysqlResponse.isSuccess());
-    Thread.sleep(500);
+    Thread.sleep(2000);
     ysqlResponse =
         localNodeUniverseManager.runYsqlCommand(
             targetNodeDetails, target, YUGABYTE_DB, "select count(*) from x_cluster", 10);

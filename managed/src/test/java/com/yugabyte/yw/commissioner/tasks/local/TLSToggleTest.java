@@ -81,7 +81,7 @@ public class TLSToggleTest extends LocalProviderUniverseTestBase {
             10);
     assertTrue(ysqlResponse.isSuccess());
 
-    Thread.sleep(300);
+    Thread.sleep(2000);
     details = universe.getUniverseDetails().nodeDetailsSet.iterator().next();
     ysqlResponse =
         localNodeUniverseManager.runYsqlCommand(
@@ -127,7 +127,7 @@ public class TLSToggleTest extends LocalProviderUniverseTestBase {
             10);
     assertTrue(ysqlResponse.isSuccess());
 
-    Thread.sleep(300);
+    Thread.sleep(2000);
     details = universe.getUniverseDetails().nodeDetailsSet.iterator().next();
     ysqlResponse =
         localNodeUniverseManager.runYsqlCommand(
