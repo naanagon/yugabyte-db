@@ -415,9 +415,9 @@ public abstract class LocalProviderUniverseTestBase extends PlatformGuiceApplica
     File curDir = new File(baseDirFile, subDir);
     if (!baseDirFile.exists() || !curDir.exists()) {
       curDir.mkdirs();
-      if (!KEEP_FAILED_UNIVERSE) {
-        curDir.deleteOnExit();
-      }
+      // if (!KEEP_FAILED_UNIVERSE) {
+      //   curDir.deleteOnExit();
+      // }
     }
     File testDir = new File(curDir, testName);
     testDir.mkdirs();
@@ -526,20 +526,20 @@ public abstract class LocalProviderUniverseTestBase extends PlatformGuiceApplica
     if (simpleSqlPayload != null) {
       simpleSqlPayload.stop();
     }
-    if (!failed || !KEEP_FAILED_UNIVERSE) {
-      localNodeManager.shutdown();
-      try {
-        for (String dirName : toCleanDirectories) {
-          String path = baseDir + "/" + dirName;
-          File directory = new File(path);
-          if (directory.exists()) {
-            FileUtils.deleteDirectory(directory);
-          }
-        }
-        FileUtils.deleteDirectory(new File(new File(new File(baseDir), subDir), testName));
-      } catch (Exception ignored) {
-      }
-    }
+    // if (!failed || !KEEP_FAILED_UNIVERSE) {
+    //   localNodeManager.shutdown();
+    //   try {
+    //     for (String dirName : toCleanDirectories) {
+    //       String path = baseDir + "/" + dirName;
+    //       File directory = new File(path);
+    //       if (directory.exists()) {
+    //         FileUtils.deleteDirectory(directory);
+    //       }
+    //     }
+    //     FileUtils.deleteDirectory(new File(new File(new File(baseDir), subDir), testName));
+    //   } catch (Exception ignored) {
+    //   }
+    // }
   }
 
   @Override
