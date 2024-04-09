@@ -390,42 +390,36 @@ public class LocalNodeManager {
         universe.getCluster(nodeDetails.placementUuid).userIntent;
     NodeInfo nodeInfo = nodesByNameMap.get(nodeName);
     Process process = nodeInfo.processMap.get(serverType);
-    String logsDir = getLogsDir(intent, serverType, nodeInfo);
-    String processLogName = "yb-" + serverType.name().toLowerCase();
+    String logsDirPath = getLogsDir(intent, serverType, nodeInfo);
+    File logsDir = new File(logsDirPath);
     try {
-      File errFile = new File(logsDir + processLogName + ".ERROR");
-      if (errFile.exists()) {
-        log.error(
-            "Node {} process {} last {} error logs: \n {}",
-            nodeName,
-            serverType,
-            ERROR_LINES_TO_DUMP,
-            getLogOutput(
-                nodeName + "_" + serverType + "_ERR", errFile, (l) -> true, ERROR_LINES_TO_DUMP));
+      // Access files inside master/logs directory
+      File[] files = logsDir.listFiles();
+      if (files != null) {
+        for (File file : files) {
+          // Log or process master file
+          if (file.exists()) {
+            log.error(
+                "Node {} process {} last {} error logs: \n {}",
+                nodeName,
+                serverType,
+                ERROR_LINES_TO_DUMP,
+                getLogOutput(
+                    nodeName + "_" + serverType + "_ERR", file, (l) -> true, ERROR_LINES_TO_DUMP));
+          }
+        }
       }
-
-      File outFile = new File(logsDir + processLogName + ".INFO");
-      if (outFile.exists()) {
+      File sysLogs = new File("/var/log/messages");
+      if (sysLogs.exists()) {
         log.error(
-            "Node {} process {} last {} kills: \n {}",
-            nodeName,
-            serverType,
-            EXIT_LINES_TO_DUMP,
-            getLogOutput(
-                nodeName + "_" + serverType + "_EXIT",
-                outFile,
-                (l) -> l.contains("exited with code"),
-                EXIT_LINES_TO_DUMP));
-
-        log.error(
-            "Node {} process {} last {} output lines: \n {}",
-            nodeName,
-            serverType,
-            OUT_LINES_TO_DUMP,
-            getLogOutput(
-                nodeName + "_" + serverType + "_OUT", outFile, (l) -> true, OUT_LINES_TO_DUMP));
+            "Spilling /var/log/messages o/p: {}", getLogOutput("test", sysLogs, (l) -> true, 1000));
+      } else {
+        sysLogs = new File("/var/log/syslog");
+        if (sysLogs.exists()) {
+          log.error(
+              "Spilling /var/log/syslog o/p: {}", getLogOutput("test", sysLogs, (l) -> true, 1000));
+        }
       }
-
     } catch (IOException ignored) {
     }
   }
