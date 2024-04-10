@@ -395,8 +395,10 @@ public class LocalNodeManager {
     try {
       // Access files inside master/logs directory
       File[] files = logsDir.listFiles();
+      System.out.println("files here: " + files.length);
       if (files != null) {
         for (File file : files) {
+          log.debug("Catching o/p for file {}", file.getName());
           // Log or process master file
           if (file.exists()) {
             log.error(
