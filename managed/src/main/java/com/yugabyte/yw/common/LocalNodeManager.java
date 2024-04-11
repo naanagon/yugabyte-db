@@ -28,6 +28,7 @@ import com.yugabyte.yw.commissioner.tasks.subtasks.InstanceActions;
 import com.yugabyte.yw.commissioner.tasks.subtasks.TransferXClusterCerts;
 import com.yugabyte.yw.common.certmgmt.CertificateHelper;
 import com.yugabyte.yw.common.config.RuntimeConfGetter;
+import com.yugabyte.yw.common.gflags.GFlagsUtil;
 import com.yugabyte.yw.common.gflags.SpecificGFlags;
 import com.yugabyte.yw.common.utils.FileUtils;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
@@ -381,49 +382,49 @@ public class LocalNodeManager {
   public void dumpProcessOutput(
       Universe universe, String nodeName, UniverseTaskBase.ServerType serverType) {
 
-    NodeDetails nodeDetails = universe.getNode(nodeName);
-    if (nodeDetails == null) {
-      log.warn("Node {} not found", nodeName);
-      return;
-    }
-    UniverseDefinitionTaskParams.UserIntent intent =
-        universe.getCluster(nodeDetails.placementUuid).userIntent;
-    NodeInfo nodeInfo = nodesByNameMap.get(nodeName);
-    Process process = nodeInfo.processMap.get(serverType);
-    String logsDirPath = getLogsDir(intent, serverType, nodeInfo);
-    File logsDir = new File(logsDirPath);
-    try {
-      // Access files inside master/logs directory
-      File[] files = logsDir.listFiles();
-      System.out.println("files here: " + files.length);
-      if (files != null) {
-        for (File file : files) {
-          log.debug("Catching o/p for file {}", file.getName());
-          // Log or process master file
-          if (file.exists()) {
-            log.error(
-                "Node {} process {} last {} error logs: \n {}",
-                nodeName,
-                serverType,
-                ERROR_LINES_TO_DUMP,
-                getLogOutput(
-                    nodeName + "_" + serverType + "_ERR", file, (l) -> true, ERROR_LINES_TO_DUMP));
-          }
-        }
-      }
-      File sysLogs = new File("/var/log/messages");
-      if (sysLogs.exists()) {
-        log.error(
-            "Spilling /var/log/messages o/p: {}", getLogOutput("test", sysLogs, (l) -> true, 1000));
-      } else {
-        sysLogs = new File("/var/log/syslog");
-        if (sysLogs.exists()) {
-          log.error(
-              "Spilling /var/log/syslog o/p: {}", getLogOutput("test", sysLogs, (l) -> true, 1000));
-        }
-      }
-    } catch (IOException ignored) {
-    }
+    // NodeDetails nodeDetails = universe.getNode(nodeName);
+    // if (nodeDetails == null) {
+    //   log.warn("Node {} not found", nodeName);
+    //   return;
+    // }
+    // UniverseDefinitionTaskParams.UserIntent intent =
+    //     universe.getCluster(nodeDetails.placementUuid).userIntent;
+    // NodeInfo nodeInfo = nodesByNameMap.get(nodeName);
+    // Process process = nodeInfo.processMap.get(serverType);
+    // String logsDirPath = getLogsDir(intent, serverType, nodeInfo);
+    // File logsDir = new File(logsDirPath);
+    // try {
+    //   // Access files inside master/logs directory
+    //   File[] files = logsDir.listFiles();
+    //   System.out.println("files here: " + files.length);
+    //   if (files != null) {
+    //     for (File file : files) {
+    //       log.debug("Catching o/p for file {}", file.getName());
+    //       // Log or process master file
+    //       if (file.exists()) {
+    //         log.error(
+    //             "Node {} process {} last {} error logs: \n {}",
+    //             nodeName,
+    //             serverType,
+    //             ERROR_LINES_TO_DUMP,
+    //             getLogOutput(
+    //                 nodeName + "_" + serverType + "_ERR", file, (l) -> true, ERROR_LINES_TO_DUMP));
+    //       }
+    //     }
+    //   }
+    //   File sysLogs = new File("/var/log/messages");
+    //   if (sysLogs.exists()) {
+    //     log.error(
+    //         "Spilling /var/log/messages o/p: {}", getLogOutput("test", sysLogs, (l) -> true, 1000));
+    //   } else {
+    //     sysLogs = new File("/var/log/syslog");
+    //     if (sysLogs.exists()) {
+    //       log.error(
+    //           "Spilling /var/log/syslog o/p: {}", getLogOutput("test", sysLogs, (l) -> true, 1000));
+    //     }
+    //   }
+    // } catch (IOException ignored) {
+    // }
   }
 
   private String getLogOutput(String prefix, File file, Predicate<String> filter, int maxLines)
@@ -499,6 +500,9 @@ public class LocalNodeManager {
         String value = gflags.get(key);
         value = replaceYbHome(value, userIntent, nodeInfo);
         gflags.put(key, value);
+      }
+      if (serverType == UniverseTaskBase.ServerType.TSERVER) {
+        gflags.put("ysql_log_min_messages", "DEBUG2");
       }
       //      if (!gflags.containsKey(GFlagsUtil.DEFAULT_MEMORY_LIMIT_TO_RAM_RATIO)
       //          && serverType != UniverseTaskBase.ServerType.CONTROLLER) {
